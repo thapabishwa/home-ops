@@ -1,0 +1,11 @@
+# Talos enforces the `baseline` Pod Security level cluster-wide. MetalLB's
+# speaker needs host networking and NET_RAW to answer ARP for the service
+# addresses, which baseline forbids -- so this one namespace is privileged.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

@@ -1,0 +1,174 @@
+# Health checks for everything on the household dashboard, run by blackbox and
+# scraped as job "household-health". Each check is a probe_success series: 1
+# passing, 0 failing. Homepage shows the count failing; the rule below raises
+# an alert after five minutes.
+#
+# One Probe per module, since a Probe takes one; the `group` label keeps the
+# checks sorted the way the dashboard is.
+# The Service, not 10.0.0.11: that is a macvlan on the worker, which pods on
+# the worker cannot reach.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: household-http
+spec:
+  jobName: household-health
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: household}
+      static:
+          - http://qbittorrent.media.svc.cluster.local:8090
+          - http://10.0.0.12:8888/unmanic/ui/dashboard/
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+# By the address the TV uses.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: jellyfin
+spec:
+  jobName: household-health
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_jellyfin_healthy
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: household}
+      static:
+          - http://10.0.0.10:8096/health
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+# By name: DNS, Traefik and the certificate as well as the app. jellyfin.internal
+# stays on HTTP -- the path the TV uses.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: household-names
+spec:
+  jobName: household-health
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx_household
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: via-traefik}
+      static:
+          - https://home.internal
+          - https://qbit.internal
+          - https://proxmox.internal
+          - https://unmanic.internal/unmanic/ui/dashboard/
+          - http://jellyfin.internal/health
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: proxmox
+spec:
+  jobName: household-health
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx_insecure
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: network}
+      static:
+          - https://10.0.0.3:8006
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: router-dns
+spec:
+  jobName: household-health
+  interval: 60s
+  scrapeTimeout: 15s
+  module: dns_router
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: network}
+      static:
+          - 10.0.0.1:53
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+# Every 5 minutes: the switch's web UI is all it has, and it allows one session.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: switch
+spec:
+  jobName: household-health
+  interval: 5m
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: network}
+      static:
+          - http://10.0.0.2
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+# The pod alone; home.internal above is the same app through Traefik.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: homepage
+spec:
+  jobName: household-health
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {group: cluster}
+      static:
+          - http://homepage.homepage.svc.cluster.local:3000
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: household-health
+spec:
+  groups:
+    - name: household-health
+      rules:
+        - alert: HouseholdCheckFailing
+          expr: probe_success{job="household-health"} == 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $labels.instance }} is failing its health check"
+            description: "Group {{ $labels.group }}. Failing for 5 minutes."

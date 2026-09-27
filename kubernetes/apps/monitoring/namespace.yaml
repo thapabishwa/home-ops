@@ -1,0 +1,11 @@
+# Privileged for node-exporter, which reads each node's /proc, /sys and root
+# filesystem through host mounts and runs in the host's network and PID
+# namespaces -- all forbidden by the `baseline` level Talos enforces elsewhere.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

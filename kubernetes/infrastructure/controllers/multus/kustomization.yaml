@@ -1,0 +1,46 @@
+# Multus: lets a pod have a second network interface besides the cluster's
+# own (flannel). Used by qBittorrent, which needs its own address on the LAN
+# (apps/media/qbittorrent.yaml says why).
+#
+# Multus becomes the CNI plugin kubelet calls for every pod. For a pod that
+# asks for nothing extra it hands straight through to flannel; but while the
+# multus daemon is down, new pods cannot get a network. Running pods are
+# unaffected.
+#
+# multus-daemonset-thick.yaml is upstream's manifest, vendored unchanged:
+# https://github.com/k8snetworkplumbingwg/multus-cni/blob/v4.3.1/deployments/multus-daemonset-thick.yml
+# The patches below are this cluster's changes to it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - multus-daemonset-thick.yaml
+images:
+  # upstream ships :snapshot-thick (whatever main is today)
+  - name: ghcr.io/k8snetworkplumbingwg/multus-cni
+    newTag: v4.3.1-thick
+patches:
+  - target:
+      kind: DaemonSet
+      name: kube-multus-ds
+    patch: |
+      # Talos ships only the CNI plugins it needs itself (bridge, flannel,
+      # host-local, loopback, portmap). Siderolabs' install-cni image copies
+      # the full reference set -- macvlan, tuning, static, ... -- into
+      # /opt/cni/bin before multus starts.
+      - op: add
+        path: /spec/template/spec/initContainers/-
+        value:
+          name: install-cni
+          image: ghcr.io/siderolabs/install-cni:v1.9.0
+          command: [/install-cni.sh]
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: cnibin
+              mountPath: /host/opt/cni/bin
+              mountPropagation: Bidirectional
+      # 50Mi is upstream's quickstart figure, and the daemon is OOM-killed
+      # near it while pods start in bulk (a node reboot).
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 150Mi

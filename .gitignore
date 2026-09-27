@@ -1,0 +1,4 @@
+
+# Python bytecode from the drill tooling.
+__pycache__/
+*.pyc

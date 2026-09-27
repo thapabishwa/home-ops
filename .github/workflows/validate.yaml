@@ -1,0 +1,135 @@
+# Checks every push before Flux, Terraform or Ansible see it. Each job is a
+# class of mistake that has already reached a real system once:
+#
+#   kubernetes  a manifest or PrometheusRule that does not apply stalls its
+#               whole Flux Kustomization, and everything after it
+#   terraform   a config that does not validate fails mid-apply on the router
+#   scripts     the controller's scoring is replayed and tested; the shell
+#               behind the outage record is linted
+#   ansible     the host playbook at least parses
+#
+# None of it needs credentials: Terraform runs against stub values, and SOPS
+# files are validated encrypted.
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  KUBECONFORM_VERSION: v0.8.0
+  PROMETHEUS_VERSION: 3.15.0
+  TERRAGRUNT_VERSION: v1.1.6
+
+jobs:
+  kubernetes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install kubeconform and promtool
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          pip install pyyaml
+
+      # What Flux applies, rendered the way Flux renders it. CRDs not in the
+      # catalog (Flux's own, Traefik's middlewares) are skipped, not failed.
+      - name: Render and validate manifests
+        run: |
+          schemas=(-schema-location default
+                   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json')
+          for dir in kubernetes/infrastructure/controllers kubernetes/infrastructure/configs kubernetes/apps; do
+            echo "::group::$dir"
+            kubectl kustomize "$dir" | kubeconform -summary -ignore-missing-schemas "${schemas[@]}"
+            echo "::endgroup::"
+          done
+          kubeconform -summary -ignore-missing-schemas "${schemas[@]}" kubernetes/clusters/home/*.yaml
+
+      - name: Check Prometheus rules
+        run: python .github/scripts/check-rules.py
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+
+      - name: Install terragrunt
+        run: |
+          curl -sSL -o /usr/local/bin/terragrunt \
+            "https://github.com/gruntwork-io/terragrunt/releases/download/${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Format
+        run: terraform fmt -check -recursive -diff home-network/terraform kubernetes/talos
+
+      # credentials.hcl and leases.hcl are gitignored; validate needs only
+      # their shape. Documentation addresses (192.0.2.0/24), never real ones.
+      - name: Validate
+        run: |
+          cat > home-network/terraform/credentials.hcl <<'EOF'
+          locals {
+            router_url      = "http://192.0.2.1"
+            router_username = "ci"
+            router_password = "ci"
+          }
+          EOF
+          printf 'locals {\n  leases = {}\n}\n' > home-network/terraform/leases.hcl
+          cat > kubernetes/talos/credentials.hcl <<'EOF'
+          locals {
+            pve_endpoint  = "https://192.0.2.3:8006/"
+            pve_api_token = "ci@pve!ci=00000000-0000-0000-0000-000000000000"
+          }
+          EOF
+          for unit in home-network/terraform kubernetes/talos; do
+            (cd "$unit" && terragrunt init -backend=false -input=false && terragrunt validate)
+          done
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Controller replay tests
+        run: python -m unittest discover -s home-network/tools/replay -v
+
+      - name: Python compiles
+        run: python -m py_compile $(git ls-files '*.py')
+
+      # Warnings and up; the scripts carry inline directives for the few
+      # deliberate exceptions.
+      - name: ShellCheck
+        run: shellcheck -S warning $(git ls-files '*.sh')
+
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Syntax check
+        run: |
+          pip install ansible-core
+          cd proxmox/ansible && ansible-playbook --syntax-check site.yml

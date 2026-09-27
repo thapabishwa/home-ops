@@ -1,0 +1,41 @@
+# Addresses MetalLB may hand to LoadBalancer Services.
+#
+# 10.0.0.30-39: below the DHCP pool (.160-.191), clear of every reservation
+# and static address, and nothing answered on any of them when this was
+# written. Ten is plenty -- an ingress needs one, and most apps go behind it.
+#
+#   10.0.0.30  Traefik (fixed, see ../controllers/traefik/helmrelease.yaml)
+#
+# A second pool, "household", holds addresses that LAN clients already know
+# by number and that a Service claims by name. It never hands one out on
+# its own (autoAssign: false).
+#
+#   10.0.0.10  Jellyfin -- the TV app is configured with 10.0.0.10:8096
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: lan
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.0.0.30-10.0.0.39
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: household
+  namespace: metallb-system
+spec:
+  autoAssign: false
+  addresses:
+    - 10.0.0.10/32
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: lan
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - lan
+    - household

@@ -1,0 +1,148 @@
+# Jellyfin, the household media server.
+#
+# The data, config, cache and log directories are the Debian package's
+# (/var/lib/jellyfin, /etc/jellyfin, ...), not the image's /config and /cache:
+# Jellyfin's database stores absolute paths to its metadata, so the server
+# keeps the layout its data was written with. The library is mounted at
+# /media, the path every library in the database points to.
+#
+# Transcoding is software-only (Dashboard > Playback: none), so the pod needs
+# no GPU.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: jellyfin
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: app-template
+  values:
+    controllers:
+      jellyfin:
+        type: statefulset
+        statefulset:
+          # config-jellyfin-0 (local-path): database, metadata, plugins and
+          # settings. Mounted twice below, one subdirectory each.
+          volumeClaimTemplates:
+            - name: config
+              accessMode: ReadWriteOnce
+              size: 10Gi
+              storageClass: local-path
+              advancedMounts:
+                app:
+                  - path: /var/lib/jellyfin
+                    subPath: data
+                  - path: /etc/jellyfin
+                    subPath: config
+        pod:
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+        containers:
+          app:
+            image:
+              repository: jellyfin/jellyfin
+              tag: 12.0.20260908-012347
+            env:
+              JELLYFIN_DATA_DIR: /var/lib/jellyfin
+              JELLYFIN_CONFIG_DIR: /etc/jellyfin
+              JELLYFIN_CACHE_DIR: /var/cache/jellyfin
+              JELLYFIN_LOG_DIR: /var/log/jellyfin
+              # The package's jellyfin user has its home here; ASP.NET keeps
+              # its data-protection keys under it (.aspnet), so they persist.
+              HOME: /var/lib/jellyfin
+              # The address clients are told to use (and that the TV has).
+              JELLYFIN_PublishedServerUrl: http://10.0.0.10:8096
+            probes:
+              readiness:
+                enabled: true
+                custom: true
+                spec:
+                  httpGet:
+                    path: /health
+                    port: 8096
+              liveness:
+                enabled: true
+                custom: true
+                spec:
+                  httpGet:
+                    path: /health
+                    port: 8096
+              startup:
+                enabled: true
+                custom: true
+                spec:
+                  httpGet:
+                    path: /health
+                    port: 8096
+                  # Database migrations and the first library load can take
+                  # minutes: allow 10 before liveness takes over.
+                  periodSeconds: 10
+                  failureThreshold: 60
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: [ALL]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+              limits:
+                memory: 3Gi
+
+    service:
+      app:
+        controller: jellyfin
+        type: LoadBalancer
+        annotations:
+          # From the "household" pool: the address the TV is set up with.
+          metallb.io/loadBalancerIPs: 10.0.0.10
+        ports:
+          http:
+            port: 8096
+
+    # No HTTP->HTTPS redirect: the TV's Jellyfin app connects over plain HTTP
+    # and would not trust the household CA. HTTPS works too, for browsers.
+    ingress:
+      app:
+        annotations:
+          cert-manager.io/cluster-issuer: internal-ca
+        tls:
+          - hosts: [jellyfin.internal]
+            secretName: jellyfin-internal-tls
+        hosts:
+          - host: jellyfin.internal
+            paths:
+              - path: /
+                pathType: Prefix
+                service:
+                  identifier: app
+                  port: http
+
+    persistence:
+      library:
+        existingClaim: library
+        globalMounts:
+          - path: /media
+            readOnly: true
+      # Image cache and transcode segments: rebuilt on demand.
+      cache:
+        type: emptyDir
+        sizeLimit: 10Gi
+        globalMounts:
+          - path: /var/cache/jellyfin
+      log:
+        type: emptyDir
+        globalMounts:
+          - path: /var/log/jellyfin
+      tmp:
+        type: emptyDir
+        globalMounts:
+          - path: /tmp

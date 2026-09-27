@@ -1,0 +1,28 @@
+# No redirect-https middleware, deliberately: a device that does not yet trust
+# the CA cannot validate an HTTPS page certified by it. HTTPS works for
+# browsers that already trust it; only the redirect is missing.
+#
+# The TLS block earns its keep twice over -- it is also what makes cert-manager
+# write ca.crt into this Secret, which is the file being served.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ca
+  annotations:
+    cert-manager.io/cluster-issuer: internal-ca
+    traefik.ingress.kubernetes.io/router.middlewares: ca-ca-file@kubernetescrd
+spec:
+  tls:
+    - hosts: [ca.internal]
+      secretName: ca-internal-tls
+  rules:
+    - host: ca.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ca
+                port:
+                  name: http

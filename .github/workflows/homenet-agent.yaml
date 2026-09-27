@@ -1,0 +1,46 @@
+# Builds kubernetes/images/homenet-agent and pushes it to
+# ghcr.io/thapabishwa/homenet-agent, tagged with the VERSION file.
+#
+# Bump VERSION to publish a new tag; the manifests in apps/homenet pin it, so a
+# rebuild never changes what is running until that pin moves too.
+name: homenet-agent image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - kubernetes/images/homenet-agent/**
+      - .github/workflows/homenet-agent.yaml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: version
+        run: echo "tag=$(tr -d '[:space:]' < kubernetes/images/homenet-agent/VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: kubernetes/images/homenet-agent
+          push: true
+          tags: |
+            ghcr.io/thapabishwa/homenet-agent:${{ steps.version.outputs.tag }}
+            ghcr.io/thapabishwa/homenet-agent:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Runtime for the household network scripts (python3 + curl on Debian 13)

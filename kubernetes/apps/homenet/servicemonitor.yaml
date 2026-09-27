@@ -1,0 +1,21 @@
+# The controller's mode and run-count, as dash-agent republishes them from
+# isp-watch's state, as job `dash-agent`. The series only leave the house through the
+# isp:controller_* recording rules in ../monitoring/wan-rules.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dash-agent
+spec:
+  jobLabel: app
+  selector:
+    matchLabels:
+      app: dash-agent
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      # The values belong to the router, not the pod: keep series identity
+      # stable across pod restarts, as the mktxp scrape does.
+      metricRelabelings:
+        - action: labeldrop
+          regex: pod|instance|container|endpoint|service|namespace

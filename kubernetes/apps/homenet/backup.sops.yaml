@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: backup
+stringData:
+    password: ENC[AES256_GCM,data:dmv7jeOVmoAG4TiV5PFaaToAL//EbA6wKTxO/u3FXwpqdYkxLiEn9heVCA==,iv:LrRxY16H87CSLT22HFXDL4A+KrrFV1UlHiPOnHE29hs=,tag:HV+1PK9yavLMKzJN2u2fSA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSArZXVJeks0dzZxUTZpek9T
+            NGg0Rk4yY3hrMWRZaGJxRVBzcUxLbUZQRzBRCkJINCtSTVVQYlJGL2RqUjhzbEZF
+            a3RYVDV1RHBrcmd5M0JHSi9wNHFrUkUKLS0tIDY2bUdKUzBBejR2djNwbW80SnFi
+            bFlIbU5haFBla0xWZXhmZXo1dFFNL1UKV14XIp/l0XVyNI4fm+4rd/Y/wwCWDR+Q
+            8zCMVkDDIc18hQksdFDt+vELUCTDrbp9p1mlHv8JPd0wlL0V5dCYUQ==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1sjmlg66lxtmwt4krugp6nncqv4mz7y4mwsau5p8ucjhe837y73gqfjdvw3
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-10-14T04:58:11Z"
+    mac: ENC[AES256_GCM,data:GPKuAaD92kZW8WKZCKiDgegXNplTfWQgfXhj3PQ4vdqBn0OapDVCm2k6khQhQd80K+ZpLJdWDymo7D2ju3U76hZMpWhTBKHKzzobkMji3rIRJiZxiRxJGCU9mHgTmZEmxlQQAFScx1k80Ob8Xe8gW0w/RqqYJxIrya4jXT+qaa0=,iv:08f4fIdDSlx1tJnXbYT5uToN9uhVENCNjF3pLCirX64=,tag:+QK1s2rvs9ObRTFPyqKhuA==,type:str]
+    pgp:
+        - created_at: "2026-10-14T04:58:11Z"
+          enc: |-
+            -----BEGIN PGP MESSAGE-----
+
+            hQEMAxaYD7+KHjePAQf+J412RGdIe0NHLMTZNnVP8NcU+J/E/GwMizmL//LfVDFy
+            huYaXSeDSHvMIwaSgCi+rRvjHgO2hBDIEGrzjVMC4VjDWIFIo1hT6tkA6Jrqj5lV
+            R1y0TW56iY++vZ+s5TQ8xFg8NAdO6QbhusJP+fI1/8P2S2W8JSMPcj5NPQrKC2gL
+            tM5feX8ooqGMjBdHMYMaYGqdHT3YY0WSiD6zSoiY1ljAu9mkKWQsTGUpDRP2XFux
+            UcI2MKEWIYmDbd4D04HNDFmQwFwQCNs0Cp9Tu8sa7s2U0vNkdX/vC0rqs4E8k8jJ
+            b6bWI9f8qiM2OHNwX/qZ5MS725Hf+b4thGsSXzCatNJeAS/RhVinMW3+7wjivu+b
+            BK+3ECII614LWU/0JYV2nlGFVBzV2zDuwU3lnfh/bwrGBWHJTU4tMhpgzYWHjUU7
+            GoZePPgE1LSyKK963LAxWcsrSbY1GPgHK+W95PyU5A==
+            =GE67
+            -----END PGP MESSAGE-----
+          fp: 389CE330EA884FC9703F4D7EB5ECACA8E170DF19
+    version: 3.13.3

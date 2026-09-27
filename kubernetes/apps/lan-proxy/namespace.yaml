@@ -1,0 +1,6 @@
+# Traefik as the reverse proxy for household services that do not run in the
+# cluster: LXC containers, the switch and pve.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lan-proxy

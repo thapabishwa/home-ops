@@ -1,0 +1,83 @@
+# Services for LAN hosts outside the cluster.
+#
+# A Service with no selector gets no endpoints of its own; the EndpointSlice
+# beside it supplies the address by hand. To Traefik it is then an ordinary
+# Service, so an Ingress can point at it like any app in the cluster.
+#
+# Ports are the backends' real ports. For a selector-less Service the
+# EndpointSlice port (matched by name) is what traffic is sent to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: unmanic
+spec:
+  ports:
+    - name: http
+      port: 8888
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: unmanic
+  labels:
+    kubernetes.io/service-name: unmanic
+addressType: IPv4
+ports:
+  - name: http
+    port: 8888
+    protocol: TCP
+endpoints:
+  - addresses: ["10.0.0.12"] # CT 105
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tplink
+spec:
+  ports:
+    - name: http
+      port: 80
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: tplink
+  labels:
+    kubernetes.io/service-name: tplink
+addressType: IPv4
+ports:
+  - name: http
+    port: 80
+    protocol: TCP
+endpoints:
+  - addresses: ["10.0.0.2"] # TL-SG108E
+---
+# pve's own HTTPS. Traefik speaks TLS to it and verifies the certificate with
+# the `pve` ServersTransport (pve-tls.yaml); the browser only ever sees
+# proxmox.internal's certificate from the household CA. Proxied over HTTPS,
+# pve's Secure login cookie works, which over plain HTTP it never could.
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxmox
+  annotations:
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+    traefik.ingress.kubernetes.io/service.serverstransport: lan-proxy-pve@kubernetescrd
+spec:
+  ports:
+    - name: https
+      port: 8006
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: proxmox
+  labels:
+    kubernetes.io/service-name: proxmox
+addressType: IPv4
+ports:
+  - name: https
+    port: 8006
+    protocol: TCP
+endpoints:
+  - addresses: ["10.0.0.3"] # pve

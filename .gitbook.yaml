@@ -1,0 +1,10 @@
+# Paths are relative to root, which is the repository root -- the directory
+# gitbook-docs.yaml maps the space to.
+root: ./
+
+structure:
+  # intro.md, not README.md: README is written for people landing on the
+  # GitHub repo, and on the site its "read it on GitBook" link would point at
+  # the page you are already on.
+  readme: intro.md
+  summary: SUMMARY.md

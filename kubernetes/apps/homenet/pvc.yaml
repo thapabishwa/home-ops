@@ -1,0 +1,19 @@
+# State, history and the widget caches, on the worker's local disk:
+#
+#   /data/www    wan.json, switch.json, power.json
+#   /data/state  counter baselines -- loss is a delta against these, so losing
+#                them costs one interval of loss data, not history
+#   /data/log    isp-events.log, isp-history.csv: the ISP outage record (the
+#                evidence behind the Worldlink ticket).
+#
+# Grows by roughly 20 KB a day; 1 GiB is decades.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: homenet-data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

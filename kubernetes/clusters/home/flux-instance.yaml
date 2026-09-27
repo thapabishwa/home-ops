@@ -1,0 +1,31 @@
+# Flux itself, as one resource the Flux Operator reconciles: which controllers,
+# which version, and where the cluster's desired state comes from.
+#
+# Replaces what `flux bootstrap` wrote into flux-system/. The version is pinned
+# exactly for the handover; loosen it to "2.9.x" to let the operator apply
+# patch releases on its own.
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.9.6"
+    registry: ghcr.io/fluxcd
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+  cluster:
+    type: kubernetes
+    multitenant: false
+    networkPolicy: true
+    domain: cluster.local
+  sync:
+    kind: GitRepository
+    url: ssh://git@github.com/thapabishwa/home-ops
+    ref: refs/heads/main
+    path: kubernetes/clusters/home
+    pullSecret: flux-system

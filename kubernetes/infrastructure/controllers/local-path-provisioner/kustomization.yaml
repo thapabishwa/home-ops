@@ -1,0 +1,48 @@
+# PersistentVolumes on the node's own disk, as directories.
+#
+# local-path-storage.yaml is upstream's release manifest, vendored unchanged:
+# https://github.com/rancher/local-path-provisioner/blob/v0.0.37/deploy/local-path-storage.yaml
+#
+# The patches are Talos's documented setup: Talos's root filesystem is
+# read-only, so volumes live under /var/mnt/local-path-provisioner, a user
+# volume declared in ../../../talos/talos.tf. The helper pods that create and
+# delete those directories use hostPath, which Talos's baseline Pod Security
+# forbids -- hence the privileged namespace.
+#
+# Not replicated: a volume lives on one node and dies with it. Fine for
+# history logs and caches; anything precious needs a backup on top.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - local-path-storage.yaml
+patches:
+  - patch: |-
+      kind: ConfigMap
+      apiVersion: v1
+      metadata:
+        name: local-path-config
+        namespace: local-path-storage
+      data:
+        config.json: |-
+          {
+                  "nodePathMap":[
+                  {
+                          "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                          "paths":["/var/mnt/local-path-provisioner"]
+                  }
+                  ]
+          }
+  - patch: |-
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: local-path
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+  - patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: local-path-storage
+        labels:
+          pod-security.kubernetes.io/enforce: privileged

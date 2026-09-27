@@ -1,0 +1,55 @@
+# Serves the household CA's public certificate at http://ca.internal, so
+# trusting it on a device is a link rather than a kubectl command.
+#
+# Must stay reachable over plain HTTP: a device that does not trust the CA yet
+# cannot validate an HTTPS page certified by it. Hence no redirect-https
+# middleware on the Ingress, as with jellyfin.internal and dash.internal.
+#
+# Only ca.crt is mounted. The Secret also holds tls.key, and serving a
+# directory would publish it -- `items` is what prevents that.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ca
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ca
+  template:
+    metadata:
+      labels:
+        app: ca
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ca
+          # Reused rather than pulling nginx: it has python3 and is pinned.
+          image: ghcr.io/thapabishwa/homenet-agent:1.0.0
+          command: [python3, -m, http.server, "8080", --directory, /srv]
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /home-internal-ca.crt, port: http }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - { name: ca, mountPath: /srv, readOnly: true }
+      volumes:
+        - name: ca
+          secret:
+            secretName: ca-internal-tls
+            items:
+              - key: ca.crt
+                path: home-internal-ca.crt

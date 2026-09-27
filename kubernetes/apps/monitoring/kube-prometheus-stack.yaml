@@ -1,0 +1,175 @@
+# Prometheus, run by the Prometheus Operator, with kube-state-metrics and
+# node-exporter for the cluster's own health.
+#
+# What it scrapes is declared next to each exporter: a ServiceMonitor for mktxp
+# (mktxp.yaml), Probes for the blackbox targets (blackbox.yaml), and the WAN
+# rules as a PrometheusRule (wan-rules.yaml). The operator picks up a change to
+# any of them and reloads Prometheus -- nothing to restart.
+#
+# Split by size. The ISP data -- the router, the WAN rules and the probes of the
+# services work depends on -- and the household health checks are
+# remote-written to Grafana Cloud, which keeps them and keeps working when this
+# cluster does not. The cluster's own metrics, ~80k series against a free tier
+# of 10k, stay here, on the local Grafana at https://grafana.internal.
+#
+# Prometheus is https://prometheus.internal. Both are closed to the guest pool
+# (middleware.yaml). There is no Alertmanager. The chart's Kubernetes rules still evaluate, and their alerts
+# are visible in Prometheus itself.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: kube-prometheus-stack
+  values:
+    # Installed by infrastructure/controllers/prometheus-operator-crds, so the
+    # ServiceMonitor, Probe and PrometheusRule here can be applied at all.
+    crds:
+      enabled: false
+
+    alertmanager:
+      enabled: false
+
+    # The cluster's Grafana: the chart's default Kubernetes dashboards and
+    # nothing else -- everything about the house is in Grafana Cloud.
+    # Stateless: the data source and the dashboards come from ConfigMaps, so a
+    # restart loses only preferences. Anyone on the LAN may look; changing anything needs the
+    # admin login in grafana-admin.sops.yaml.
+    grafana:
+      enabled: true
+      admin:
+        existingSecret: grafana-admin
+      grafana.ini:
+        server:
+          root_url: https://grafana.internal
+        auth.anonymous:
+          enabled: true
+          org_role: Viewer
+        users:
+          allow_sign_up: false
+        analytics:
+          reporting_enabled: false
+          check_for_updates: false
+      ingress:
+        enabled: true
+        annotations:
+          cert-manager.io/cluster-issuer: internal-ca
+          traefik.ingress.kubernetes.io/router.middlewares: monitoring-redirect-https@kubernetescrd,monitoring-not-guests@kubernetescrd
+        hosts: [grafana.internal]
+        tls:
+          - hosts: [grafana.internal]
+            secretName: grafana-internal-tls
+
+    # Talos binds these to localhost on the control plane, so a scrape from a
+    # pod can never reach them; their targets and rules would sit failing.
+    kubeControllerManager:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+    kubeProxy:
+      enabled: false
+    defaultRules:
+      rules:
+        alertmanager: false
+        etcd: false
+        kubeControllerManager: false
+        kubeProxy: false
+        kubeSchedulerAlerting: false
+        kubeSchedulerRecording: false
+        windows: false
+      disabled:
+        # "Requests exceed what is left if the largest node dies." With one
+        # tainted control plane and one worker, that asks whether the apps fit
+        # on a node they cannot be scheduled on -- in a cluster where
+        # surviving node loss is a non-goal. It fires permanently, by design.
+        KubeCPUOvercommit: true
+        KubeMemoryOvercommit: true
+        # There is no Alertmanager on purpose; Grafana Cloud delivers alerts.
+        PrometheusNotConnectedToAlertmanagers: true
+
+    prometheus:
+      ingress:
+        enabled: true
+        annotations:
+          cert-manager.io/cluster-issuer: internal-ca
+          traefik.ingress.kubernetes.io/router.middlewares: monitoring-redirect-https@kubernetescrd,monitoring-not-guests@kubernetescrd
+        hosts: [prometheus.internal]
+        paths: [/]
+        tls:
+          - hosts: [prometheus.internal]
+            secretName: prometheus-internal-tls
+
+      prometheusSpec:
+        # 30s, not 15s: an mktxp scrape opens a RouterOS API session and walks
+        # several menus on a two-core router that is also routing.
+        scrapeInterval: 30s
+        evaluationInterval: 30s
+
+        # Every ServiceMonitor, PodMonitor, Probe and PrometheusRule in the
+        # cluster, not only those carrying this release's label.
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelectorNilUsesHelmValues: false
+        probeSelectorNilUsesHelmValues: false
+        ruleSelectorNilUsesHelmValues: false
+        scrapeConfigSelectorNilUsesHelmValues: false
+
+        # Only `site`. The chart would add `prometheus` and
+        # `prometheus_replica` to every series, which in Grafana Cloud would
+        # make each remote-written series a new one.
+        externalLabels:
+          site: home
+        prometheusExternalLabelNameClear: true
+        replicaExternalLabelNameClear: true
+
+        # Local retention is short on purpose: what matters is remote-written,
+        # so the volume holds a working set rather than the record.
+        retention: 7d
+        retentionSize: 4GB
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: local-path
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 5Gi
+
+        resources:
+          requests: {cpu: 100m, memory: 512Mi}
+          limits: {memory: 2Gi}
+
+        # Ships to the same Grafana Cloud stack as the Nokia ONT exporter, so
+        # optical degradation can be laid against the loss it causes.
+        remoteWrite:
+          - url: https://prometheus-prod-43-prod-ap-south-1.grafana.net/api/prom/push
+            basicAuth:
+              username: {name: prometheus-credentials, key: username}
+              password: {name: prometheus-credentials, key: token}
+
+            # Every series from the router exporter, the work-services probes
+            # and the household health checks (their `up` included, which
+            # RouterUnreachable needs), and the isp:* and home:* recording
+            # rules: about a thousand series. The cluster's own metrics stay
+            # here.
+            writeRelabelConfigs:
+              - sourceLabels: [job, __name__]
+                separator: ";"
+                regex: '(mktxp|blackbox-work|household-health);.*|[^;]*;(isp|home):.*'
+                action: keep
+
+            queueConfig:
+              # A home uplink dropping out is when these metrics matter most.
+              # Two hours of buffer means an outage backfills rather than
+              # leaving a gap.
+              capacity: 10000
+              maxShards: 10
+              maxSamplesPerSend: 2000
+              batchSendDeadline: 30s
+              minBackoff: 1s
+              maxBackoff: 5m
+              sampleAgeLimit: 2h

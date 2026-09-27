@@ -1,0 +1,10 @@
+# Any path on ca.internal serves the certificate, so the instruction is
+# "open http://ca.internal" with nothing to type after it. ReplacePath rather
+# than a redirect: one request, and no URL for anyone to mistype.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ca-file
+spec:
+  replacePath:
+    path: /home-internal-ca.crt

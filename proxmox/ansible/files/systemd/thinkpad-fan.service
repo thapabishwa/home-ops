@@ -1,0 +1,12 @@
+[Unit]
+Description=ThinkPad temperature-driven fan curve (aggressive, never stops)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fan-curve.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

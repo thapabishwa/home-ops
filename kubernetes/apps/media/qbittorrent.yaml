@@ -1,0 +1,115 @@
+# qBittorrent, the household download client.
+#
+# Download traffic has to leave from 10.0.0.11: the router spreads it across
+# ISP1 and ISP2 by that source address (home-network/terraform/downloads.tf),
+# and a pod's ordinary traffic leaves as its node instead. So the pod gets a
+# second interface, net1, on the LAN (lan-network.yaml) with 10.0.0.11 and a
+# fixed MAC, and qBittorrent binds its download sockets to net1 (Options >
+# Advanced > Network interface; stored in qBittorrent.conf on the config
+# volume). Traffic from 10.0.0.11 leaves through the router; everything else
+# -- the web UI behind Traefik, probes, DNS -- stays on the cluster network.
+#
+# A macvlan interface cannot talk to its own host, so in-cluster clients
+# (Homepage, the health checks) use the Service, not 10.0.0.11. LAN devices can use either.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: qbittorrent
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: app-template
+  values:
+    controllers:
+      qbittorrent:
+        type: statefulset
+        statefulset:
+          # config-qbittorrent-0 (local-path): qBittorrent.conf, the download
+          # list and resume data (BT_backup).
+          volumeClaimTemplates:
+            - name: config
+              accessMode: ReadWriteOnce
+              size: 1Gi
+              storageClass: local-path
+              globalMounts:
+                - path: /config
+        pod:
+          annotations:
+            # net1: 10.0.0.11 with a MAC of its own, so the router's view of
+            # the host never changes.
+            k8s.v1.cni.cncf.io/networks: |
+              [{"name": "lan", "interface": "net1", "ips": ["10.0.0.11/24"], "mac": "BC:24:11:03:AA:5D"}]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+        containers:
+          app:
+            image:
+              repository: ghcr.io/home-operations/qbittorrent
+              tag: 5.2.3
+            probes:
+              readiness:
+                enabled: true
+                custom: true
+                spec:
+                  tcpSocket:
+                    port: 8090
+              liveness:
+                enabled: true
+                custom: true
+                spec:
+                  tcpSocket:
+                    port: 8090
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: [ALL]
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 2Gi
+
+    service:
+      app:
+        controller: qbittorrent
+        ports:
+          http:
+            port: 8090
+
+    ingress:
+      app:
+        annotations:
+          cert-manager.io/cluster-issuer: internal-ca
+          traefik.ingress.kubernetes.io/router.middlewares: media-redirect-https@kubernetescrd
+        tls:
+          - hosts: [qbit.internal]
+            secretName: qbit-internal-tls
+        hosts:
+          - host: qbit.internal
+            paths:
+              - path: /
+                pathType: Prefix
+                service:
+                  identifier: app
+                  port: http
+
+    persistence:
+      # Save paths in the download list are /downloads/...
+      downloads:
+        existingClaim: library
+        globalMounts:
+          - path: /downloads
+            subPath: downloads
+      tmp:
+        type: emptyDir
+        globalMounts:
+          - path: /tmp

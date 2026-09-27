@@ -1,0 +1,79 @@
+# One Ingress per household name, each with its own certificate from the
+# internal CA. Plain HTTP redirects to HTTPS (see redirects.yaml). Traefik
+# passes Host through unchanged.
+#
+# Unmanic has no authentication. It stays reachable from the LAN only,
+# which is all Traefik's address is.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: unmanic
+  annotations:
+    cert-manager.io/cluster-issuer: internal-ca
+    traefik.ingress.kubernetes.io/router.middlewares: lan-proxy-redirect-https@kubernetescrd
+spec:
+  tls:
+    - hosts: [unmanic.internal]
+      secretName: unmanic-internal-tls
+  rules:
+    - host: unmanic.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: unmanic
+                port:
+                  name: http
+---
+# The switch's old frame-based UI. http://switch.internal reaches it directly
+# if the proxied view misbehaves.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tplink
+  annotations:
+    cert-manager.io/cluster-issuer: internal-ca
+    traefik.ingress.kubernetes.io/router.middlewares: lan-proxy-redirect-https@kubernetescrd
+spec:
+  tls:
+    - hosts: [tplink.internal]
+      secretName: tplink-internal-tls
+  rules:
+    - host: tplink.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tplink
+                port:
+                  name: http
+---
+# Proxmox, proxied over HTTPS end to end (see the proxmox Service in
+# backends.yaml). Replaces the old redirect to https://pve.internal:8006,
+# which existed only because pve cannot work proxied over plain HTTP.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: proxmox
+  annotations:
+    cert-manager.io/cluster-issuer: internal-ca
+    traefik.ingress.kubernetes.io/router.middlewares: lan-proxy-redirect-https@kubernetescrd
+spec:
+  tls:
+    - hosts: [proxmox.internal]
+      secretName: proxmox-internal-tls
+  rules:
+    - host: proxmox.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: proxmox
+                port:
+                  name: https

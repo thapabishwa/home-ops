@@ -1,0 +1,15 @@
+# bjw-s app-template: a generic chart for apps without a maintained one of
+# their own. The community Homepage chart ships Homepage v1.2.0 (May 2025);
+# this one runs whatever image it is given.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: app-template
+spec:
+  interval: 12h
+  url: oci://ghcr.io/bjw-s-labs/helm/app-template
+  ref:
+    tag: 5.2.1
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy

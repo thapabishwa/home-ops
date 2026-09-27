@@ -1,0 +1,11 @@
+# HTTP -> HTTPS for qbit.internal (media-redirect-https@kubernetescrd).
+# Not used by jellyfin.internal, which must keep answering plain HTTP: TV and
+# phone Jellyfin apps do not trust the household CA.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

@@ -1,0 +1,46 @@
+# Blackbox modules. Trimmed to the ones actually used -- the upstream sample
+# ships IRC, POP3, gRPC and SSH probers this network has no use for.
+modules:
+  http_2xx:
+    prober: http
+    http:
+      preferred_ip_protocol: "ip4"
+
+  # The household's own names, over HTTPS, trusting the household CA:
+  # proves DNS, Traefik and the certificate as well as the app.
+  http_2xx_household:
+    prober: http
+    http:
+      preferred_ip_protocol: "ip4"
+      tls_config:
+        ca_file: /etc/household-ca/ca.crt
+
+  # Jellyfin answers its health endpoint with the literal word.
+  http_jellyfin_healthy:
+    prober: http
+    http:
+      preferred_ip_protocol: "ip4"
+      fail_if_body_not_matches_regexp: ["^Healthy$"]
+
+  # pve's own certificate is from pve's cluster CA, for the name `pve`, so
+  # by address it cannot verify. proxmox.internal checks the verified path.
+  http_2xx_insecure:
+    prober: http
+    http:
+      preferred_ip_protocol: "ip4"
+      tls_config:
+        insecure_skip_verify: true
+
+  # The router's resolver, asked for a name that does not move when a
+  # service changes proxy -- so this tests the resolver and nothing else.
+  dns_router:
+    prober: dns
+    dns:
+      preferred_ip_protocol: "ip4"
+      query_name: pve.internal
+      query_type: A
+      valid_rcodes: [NOERROR]
+      validate_answer_rrs:
+        fail_if_none_matches_regexp:
+          - '^pve\.internal\.\s+\d+\s+IN\s+A\s+10\.0\.0\.3$'
+

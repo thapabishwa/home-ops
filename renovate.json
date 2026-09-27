@@ -1,0 +1,92 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":disableRateLimiting"
+  ],
+  "timezone": "Asia/Kathmandu",
+  "schedule": [
+    "before 9am on saturday"
+  ],
+  "prConcurrentLimit": 10,
+  "labels": [
+    "renovate"
+  ],
+  "flux": {
+    "managerFilePatterns": [
+      "/^kubernetes/.+\\.ya?ml$/"
+    ]
+  },
+  "kubernetes": {
+    "managerFilePatterns": [
+      "/^kubernetes/(apps|infrastructure)/.+\\.ya?ml$/"
+    ]
+  },
+  "customManagers": [
+    {
+      "description": "Talos version the VMs are built with",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^kubernetes/talos/nodes\\.tf$/"
+      ],
+      "matchStrings": [
+        "talos_version\\s*=\\s*\"(?<currentValue>v[^\"]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "siderolabs/talos"
+    },
+    {
+      "description": "Flux version the Flux Operator runs (FluxInstance)",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^kubernetes/clusters/home/flux-instance\\.yaml$/"
+      ],
+      "matchStrings": [
+        "version:\\s*\"(?<currentValue>[0-9][^\"]*)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "fluxcd/flux2",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The cluster's own image: bumped by hand via images/homenet-agent/VERSION",
+      "matchPackageNames": [
+        "ghcr.io/thapabishwa/homenet-agent"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Talos and Flux change the platform itself: labelled 'platform'. A Talos bump also needs `terragrunt apply` in kubernetes/talos after merging.",
+      "matchPackageNames": [
+        "siderolabs/talos",
+        "fluxcd/flux2"
+      ],
+      "addLabels": [
+        "platform"
+      ]
+    },
+    {
+      "description": "API versions of Kubernetes objects are not dependencies worth a PR",
+      "matchDatasources": [
+        "kubernetes-api"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "homenet-agent's Python stays on the line its scripts were written for; a new minor is a deliberate choice",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchPackageNames": [
+        "python"
+      ],
+      "allowedVersions": "<3.14"
+    }
+  ],
+  "terragrunt": {
+    "enabled": false
+  }
+}

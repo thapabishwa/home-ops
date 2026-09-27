@@ -1,0 +1,549 @@
+# ISP-control -- scheduler-driven health, reputation and ranking for three WANs.
+#
+# Replaces ISP0-health / ISP1-health / ISP2-health, which were invoked from
+# netwatch up-script/down-script and were silently broken: a script run from a
+# netwatch hook CANNOT persist a :global. The 15-minute failback damping in
+# those scripts tested [:typeof $ispNLastChange] != "nothing", which was always
+# "nothing", so the guard never engaged and every failback was immediate --
+# six flaps on the night of 2026-09-19, two of them under 10 seconds, with the
+# scripts logging success each time. Verified by running two identical
+# one-line scripts: manually the global persisted, from netwatch it did not.
+#
+# Scheduler-run scripts persist globals normally, so all state lives here and
+# netwatch goes back to only measuring. It no longer decides anything.
+#
+# This file is the readable source of truth. It is NOT what is loaded on the
+# router -- script.tf strips these comments and blank lines before Terraform
+# sends the body, because a RouterOS script stored as a single string would
+# otherwise have everything after the first "#" commented out.
+#
+# State (all :global, all surviving between runs but NOT across a reboot):
+#   ispRep    per-ISP reputation, 0..1000000 per-million, 1000000 = perfect
+#             (logged as per-mille for readability). Per-million because the
+#             0.5%/tick recovery step truncates to nothing at lower precision.
+#   ispPrevD  cumulative netwatch done-tests at the previous tick
+#   ispPrevF  cumulative netwatch failed-tests at the previous tick
+#   ispTick   monotonic tick counter -- used instead of timestamps so there is
+#             no time arithmetic to get wrong and no sensitivity to clock steps
+#   ispLastSw tick at which the primary last changed
+#   ispPrimary  currently chosen primary, 0..2
+#   ispShadow 1 = decide and log but do not touch routes
+#   ispHold   ticks a challenger must wait before it may take the primary slot
+#   ispYield  per-ISP: has this link lost the top slot in the tier table that
+#             prefers it? Hysteresis, so a tier does not bounce on a blip.
+#   ispPrevHard  per-ISP hard-down state at the previous tick, so a link going
+#             down is detected as a transition and flushed exactly once.
+#   ispPrevUp per-ISP count of probes up at the previous tick, so per-probe
+#             detail is logged when that count changes rather than every tick.
+#
+# Reputation does NOT survive a reboot -- RouterOS globals are memory only. The
+# controller therefore adopts the currently active route on its first tick and
+# rebuilds reputation from there, so a restart costs history but never causes a
+# switch on its own.
+
+:global ispRep
+:global ispPrevD
+:global ispPrevF
+:global ispTick
+:global ispLastSw
+:global ispPrimary
+:global ispShadow
+:global ispHold
+:global ispYield
+:global ispPrevHard
+:global ispPrevUp
+
+# Event counters, added 2026-09-28. Monotonic, per-ISP where it makes sense,
+# reset only by reboot -- which Prometheus handles natively via increase().
+# They exist because the decisions this script makes were recorded ONLY in the
+# router log, and that log holds about 13 hours before it rotates. Every
+# incident reconstruction so far has been a race against that window. Nothing
+# collects them yet: the REST API does not expose script globals (it returns
+# 500), so they are read from the terminal with /system/script/environment print.
+#   ispHardCount   rising edges of hard-down, per ISP
+#   ispYieldCount  yield state transitions in either direction, per ISP
+#   ispSwCount     primary failovers -- NOT counting cold-start adoption
+:global ispHardCount
+:global ispYieldCount
+:global ispSwCount
+
+:if ([:typeof $ispRep] = "nothing") do={
+  :set ispRep [:toarray "1000000,1000000,1000000"]
+  :set ispPrevD [:toarray "0,0,0"]
+  :set ispPrevF [:toarray "0,0,0"]
+  :set ispTick 0
+  :set ispLastSw 0
+  :set ispPrimary -1
+  :set ispYield [:toarray "0,0,0"]
+  :set ispPrevHard [:toarray "0,0,0"]
+}
+:if ([:typeof $ispPrevHard] = "nothing") do={ :set ispPrevHard [:toarray "0,0,0"] }
+:if ([:typeof $ispPrevUp] = "nothing") do={ :set ispPrevUp [:toarray "3,3,3"] }
+
+# ---------------------------------------------------------------------------
+# TWO RATES, ONE SCRIPT.
+#
+# The scheduler runs this every second. Almost all of it does not need to run
+# that often -- the EWMA, the hold timer and the heartbeat are all calibrated
+# per tick, and running them ten times faster would silently retune the whole
+# scoring system. So the expensive half is gated to every tenth pass and still
+# sees a 10s tick, exactly as before. ispHold stays 90, the heartbeat modulus
+# stays 90, `a` stays 995, and every constant keeps the meaning its comment
+# claims.
+#
+# What DOES run every second is the block below: notice that every probe on a
+# link has failed, and get traffic off it. That is the whole failover latency
+# budget -- it used to wait up to a full 10s tick behind work it did not need.
+#
+# This replaced a separate ISP-fast script called from netwatch down-scripts on
+# 2026-09-28. That worked -- it fired for real at 23:32:38 and demoted ISP1
+# seven seconds before the controller even noticed -- but it meant two scripts
+# and two invocation paths for one decision. A script run from netwatch also
+# cannot persist a :global, so the emergency path could never be more than
+# stateless anyway. One scheduler, one script, one path.
+#
+# Deliberately stateless even here, because it runs nine times between scoring
+# passes: no global is read or written, every input comes fresh from netwatch
+# and the routing table. Demotion is +50 guarded by `< 50`, so repeated passes
+# converge instead of stacking. That matches the hard-down convention below
+# (1 -> 51), so the next scoring pass reads a state it already understands.
+#
+# `ran > 0` for the same reason it guards the hard-down below: a probe that has
+# never completed a test is not evidence. Without it every reboot and every
+# apply would demote all three links.
+#
+# NOT the probe tables. They hold one route each, so demoting the only route in
+# a table changes nothing -- and the scoring pass never writes those tables, so
+# the 51 would stay forever. Observed 2026-09-28 23:32, once, on probe-isp1.
+:global ispSubTick
+:if ([:typeof $ispSubTick] = "nothing") do={ :set ispSubTick 0 }
+:set ispSubTick ($ispSubTick + 1)
+
+:local fnm [:toarray "ISP0,ISP1,ISP2"]
+:local fif [:toarray "wan-isp0,wan-isp1,wan-isp2"]
+:for i from=0 to=2 do={
+  :local fu 0
+  :local fran 0
+  :foreach n in=[/tool/netwatch/find comment=(($fnm->$i) . "-probe")] do={
+    :if ([/tool/netwatch/get $n done-tests] > 0) do={ :set fran ($fran + 1) }
+    :if ([/tool/netwatch/get $n status] = "up") do={ :set fu ($fu + 1) }
+  }
+  :if (($fu = 0) && ($fran > 0)) do={
+    :local fmoved 0
+    :foreach r in=[/ip/route/find dst-address="0.0.0.0/0" gateway~($fif->$i)] do={
+      :if (!([/ip/route/get $r routing-table]~"^probe-")) do={
+        :local fd [:tonum [/ip/route/get $r distance]]
+        :if ($fd < 50) do={
+          /ip/route/set $r distance=($fd + 50)
+          :set fmoved ($fmoved + 1)
+        }
+      }
+    }
+    :if ($fmoved > 0) do={
+      :log warning ("ISP-fastpath " . ($fnm->$i) . " all probes down, demoted " . $fmoved . " routes")
+    }
+  }
+}
+
+# Everything below is the scoring pass: once every ten seconds, as it always was.
+:if (($ispSubTick % 10) = 0) do={
+:if ([:typeof $ispHardCount] = "nothing") do={ :set ispHardCount [:toarray "0,0,0"] }
+:if ([:typeof $ispYieldCount] = "nothing") do={ :set ispYieldCount [:toarray "0,0,0"] }
+:if ([:typeof $ispSwCount] = "nothing") do={ :set ispSwCount 0 }
+:if ([:typeof $ispYield] = "nothing") do={ :set ispYield [:toarray "0,0,0"] }
+
+# Deliberately separate from the block above so the mode and the hold time can
+# be changed live from the terminal without resetting accumulated reputation.
+#
+# Defaults to ENFORCING, and that default is the whole point. It used to
+# default to shadow, which is the safe choice for a first deploy and the wrong
+# one for every reboot after it: RouterOS globals are memory only, so a restart
+# re-initialises this and the controller comes back up deciding but not acting.
+# The hEX rebooted at ~19:50 on 2026-09-22 and failover was silently disabled
+# for the following 12.5 hours -- nothing in the log looked wrong, because the
+# controller was running perfectly and merely declining to touch anything.
+# Shadow is now opt-in from the terminal for a deliberate test.
+:if ([:typeof $ispShadow] = "nothing") do={ :set ispShadow 0 }
+:if ([:typeof $ispHold] = "nothing") do={ :set ispHold 90 }
+
+:set ispTick ($ispTick + 1)
+
+# ADVERTISED capacity -- 600 / 400 / 200, the plan figures.
+#
+# Reverted to 600 on 2026-09-28 (user confirmed: "Worldlink is 600 right now").
+# It had been set to 400 on 2026-09-24 in anticipation of a plan change due in
+# October -- a change that has not happened yet. Four days of a link being
+# ranked a third smaller than it is.
+#
+# The cost was visible the same evening. At 400 ISP0 ties ISP1 on capacity, so
+# ranking between them collapses to reputation alone, and a 30-point reputation
+# gap was enough to park main -- and with it the household tier and the router's
+# own DNS -- on Vianet: the link whose CPE had disappeared six times that day
+# and which carries ~13x Worldlink's lifetime probe failures. Worldlink scored
+# 340,400 against Vianet's 352,400. At its real 600 it scores 510,600 and holds
+# the slot.
+#
+# Put the 400 back when the plan actually changes, not before. There is a rule
+# about this already: do not edit config for plans not yet in hand.
+#
+# This reverted from measured values on 2026-09-24, and the reason it is safe
+# now and was not before is worth stating.
+#
+# Capacity exists here only to stop a flawless small link outranking a
+# marginally worse big one. What it needs is a stable sense of relative size,
+# and the advertised figures give that: 3 : 2 : 1, roughly what the measurements
+# showed (568.8 / ~400 / 149.3). It becomes 2 : 2 : 1 when ISP0 drops to 400.
+#
+# Measured values were introduced on 2026-09-20 because a pristine-looking ISP0
+# was about to be promoted on its sold 600 minutes after blacking out twice.
+# But that was a symptom of two bugs, both since fixed: reputation had a hard
+# ceiling at 801 from integer truncation, so it was barely functioning, and
+# there was no yield logic to evacuate a tier. Capacity was doing work that
+# reputation should have been doing. It no longer has to.
+#
+# Measured values also rot. ISP0 was worth 200 one evening and 570 the next
+# morning; a constant in a script cannot track that, and ISP1's figure was
+# taken while it carried household traffic and understated the link by a third.
+# That last one is now settled: ISP1 measured 288.7 contended, was flagged as
+# understated and used anyway, and after the 2026-09-26 move off PPPoE to
+# routed DHCP it reads a clean 400 -- so the contention was the entire gap, the
+# 400 here is measured rather than assumed, and the extra layer of NAT costs
+# nothing on this link.
+# What each link ACTUALLY delivers now lives in Prometheus, where it is
+# observed continuously instead of guessed once:
+#
+#   max_over_time(rate(mktxp_interface_rx_byte_total{name=~"wan.*"}[5m])[7d:5m])
+#
+# The gap between that and the figures below is the interesting number -- it is
+# the "sold 600, delivering 200" story -- and it belongs on a dashboard, not
+# baked into a ranking constant.
+# PENDING 2026-11-02: Worldlink drops 600 -> 400. Change this to "400,400,200"
+# and queues.tf isp0 to 380M/186M in the same commit; they must not drift.
+:local caps [:toarray "600,400,200"]
+:local nm [:toarray "ISP0,ISP1,ISP2"]
+:local ifn [:toarray "wan-isp0,wan-isp1,wan-isp2"]
+
+:local score [:toarray "0,0,0"]
+:local hard [:toarray "0,0,0"]
+:local lp [:toarray "0,0,0"]
+:local upc [:toarray "0,0,0"]
+
+:for i from=0 to=2 do={
+  :local d 0
+  :local f 0
+  :local u 0
+  :local ran 0
+  :local dn ""
+  :foreach n in=[/tool/netwatch/find comment=(($nm->$i) . "-probe")] do={
+    :set d ($d + [/tool/netwatch/get $n done-tests])
+    :set f ($f + [/tool/netwatch/get $n failed-tests])
+    :if ([/tool/netwatch/get $n done-tests] > 0) do={ :set ran ($ran + 1) }
+    :if ([/tool/netwatch/get $n status] = "up") do={
+      :set u ($u + 1)
+    } else={
+      # A probe that has never completed a test has no `since` yet.
+      :local s [:tostr [/tool/netwatch/get $n since]]
+      :if ($s = "") do={ :set s "untested" }
+      :set dn ($dn . " " . [/tool/netwatch/get $n host] . "@" . $s)
+    }
+  }
+  :set ($upc->$i) $u
+  # Which probes, not just how many. The heartbeat says up=2/3; this says which
+  # target and since when, so a failure shared by one operator across all three
+  # links reads as that operator, not as three ISPs. Logged only when the count
+  # changes, so an outage costs two lines per link rather than one per tick.
+  :if ($u != [:tonum ($ispPrevUp->$i)]) do={
+    :if ($u < 3) do={
+      :log warning ("ISP-probe " . ($nm->$i) . " up=" . $u . "/3 down:" . $dn)
+    } else={
+      :log warning ("ISP-probe " . ($nm->$i) . " up=3/3")
+    }
+    :set ($ispPrevUp->$i) $u
+  }
+  # Loss over this interval only. The cumulative figure is useless for judging
+  # current health: a link that was down for an hour reads near 100 percent
+  # long after it has recovered.
+  :local dd ($d - [:tonum ($ispPrevD->$i)])
+  :local df ($f - [:tonum ($ispPrevF->$i)])
+  :set ($ispPrevD->$i) $d
+  :set ($ispPrevF->$i) $f
+  # A tick can land between probe results, and after a reboot the counters go
+  # backwards. Either way there is nothing new to score, so leave the
+  # reputation untouched rather than inventing a sample -- the previous version
+  # fell back to the cumulative ratio here, which re-applied the same lifetime
+  # average every tick and dragged reputation down on a link doing nothing
+  # wrong.
+  :local fresh true
+  :if ($dd <= 0) do={ :set fresh false }
+  :local l 0
+  :if ($fresh) do={ :set l ($df * 1000 / $dd) }
+  # All three probes down is a different event from packet loss, and the three
+  # are independent operators, so it means the path is gone rather than that
+  # one responder is sulking. Scored as total failure.
+  # `ran > 0` because a probe that has never completed a test is not evidence
+  # of anything. Without it, every Terraform apply that touches netwatch reads
+  # as a total outage: on 2026-09-28 22:25:05 an interval change recreated all
+  # nine probes, all nine reported down@untested in the same tick, and the
+  # controller hard-downed all three links at once -- flushing conntrack on
+  # every one of them and dropping reputation from ~950 to ~610. It recovered
+  # in twenty minutes, but it killed every established connection in the house
+  # to do it. ISP-probe-why already guards the same way with failed-tests > 0.
+  :if (($u = 0) && ($ran > 0)) do={ :set ($hard->$i) 1 ; :set l 1000 ; :set fresh true }
+  :set ($lp->$i) $l
+  # EWMA, deliberately lopsided: a bad sample is weighted 30 percent, a good
+  # one 0.5 percent. Reputation is therefore lost in seconds and earned back
+  # over roughly an hour and a half, which is the "falls down the pecking
+  # order" behaviour rather than a plain moving average. It is also the damping
+  # itself -- a property of the score rather than a timer bolted on beside it,
+  # which is the part that failed before. A link with recurring incidents never
+  # climbs back between them, which is the whole point.
+  :local r [:tonum ($ispRep->$i)]
+  :if ($fresh) do={
+    # Reputation is held per-MILLION, not per-mille. At per-mille the recovery
+    # step (r*995 + 1000*5)/1000 truncates: at r=801 it yields 801995/1000 =
+    # 801 and stops moving, so reputation had a hard ceiling at 801 and no link
+    # could ever return to full health. Every link converged there after its
+    # first blemish and ranking silently degenerated into static capacity.
+    # Observed 2026-09-20: ISP0 and ISP1 both sat at exactly 801 for an hour.
+    # The extra three digits keep the per-tick increment well above the
+    # truncation floor.
+    :local q ((1000 - $l) * 1000)
+    :local a 995
+    :if ($q < $r) do={ :set a 700 }
+    :set r (($r * $a + $q * (1000 - $a)) / 1000)
+    :if ($r > 1000000) do={ :set r 1000000 }
+    :if ($r < 0) do={ :set r 0 }
+    :set ($ispRep->$i) $r
+  }
+  :set ($score->$i) ($r * [:tonum ($caps->$i)] / 1000000)
+}
+
+# A link that has yielded its tier is not a candidate while any link that has
+# not yielded is. Score alone multiplies reputation by capacity, so a big link
+# climbing back from a blackout can outscore a small clean one long before it
+# deserves to: on 2026-09-27 ISP0 at 322k (x600) edged past ISP2 at 966k
+# (x200) into second place, and was hard-down again two minutes later. Second
+# place is the fallback -- used exactly when first place fails -- so it must go
+# to a link that is healthy, not one that is merely large. Yield is the
+# health test because it carries the 500/800 hysteresis already. This reads
+# the previous tick's yield -- this tick's is decided further down -- so a link
+# that went hard-down THIS tick counts as yielded too. Without that it stays
+# primary for one extra tick: the drill on 2026-09-27 showed ISP0 pushed to
+# distance 51 yet still named primary until the next tick.
+:local best 0
+:for i from=1 to=2 do={
+  :local yi [:tonum ($ispYield->$i)]
+  :local yb [:tonum ($ispYield->$best)]
+  :if ([:tonum ($hard->$i)] = 1) do={ :set yi 1 }
+  :if ([:tonum ($hard->$best)] = 1) do={ :set yb 1 }
+  :if (($yi < $yb) || (($yi = $yb) && ([:tonum ($score->$i)] > [:tonum ($score->$best)]))) do={ :set best $i }
+}
+
+:local why ""
+
+:if ($ispPrimary < 0) do={
+  # Cold start: adopt whatever is already carrying traffic instead of picking
+  # the best score. Every reputation is 1000 on the first tick, so scoring
+  # would rank purely on capacity and hand the primary slot to the biggest
+  # pipe -- which on 2026-09-20 meant promoting ISP0 seventeen minutes after it
+  # had blacked out. The controller starting up must not itself be a failover
+  # event; it earns the right to move the primary once it has evidence.
+  :local cur -1
+  :for i from=0 to=2 do={
+    :foreach r in=[/ip/route/find dst-address="0.0.0.0/0" routing-table=main gateway~($ifn->$i)] do={
+      :if ([/ip/route/get $r active]) do={ :set cur $i }
+    }
+  }
+  :if ($cur < 0) do={ :set cur $best }
+  :set ispPrimary $cur
+  :set ispLastSw $ispTick
+  :set why "adopt"
+} else={
+  :if ($best != $ispPrimary) do={
+    # Failover is immediate when the current primary has actually gone; only
+    # promotion on quality grounds is damped. Asymmetry is the whole point --
+    # waiting 15 minutes to leave a dead link would be absurd.
+    :if ([:tonum ($hard->$ispPrimary)] = 1) do={
+      :set ispPrimary $best
+      :set ispLastSw $ispTick
+      :set why "primary-down"
+      :set ispSwCount ($ispSwCount + 1)
+    } else={
+      :if (($ispTick - $ispLastSw) >= $ispHold) do={
+        # A margin as well as a timer, so two near-equal links do not trade the
+        # primary slot back and forth every time the hold expires.
+        :if ([:tonum ($score->$best)] > ([:tonum ($score->$ispPrimary)] * 110 / 100)) do={
+          :set ispPrimary $best
+          :set ispLastSw $ispTick
+          :set why "sustained-advantage"
+          :set ispSwCount ($ispSwCount + 1)
+        } else={
+          # A primary that has yielded is not kept on score. Without this,
+          # main could only leave a yielded link if a challenger beat it by
+          # 110% -- which a small healthy link never does against a large one
+          # at even 40% reputation. On 2026-09-27 that left main, and with it
+          # the router's own DNS for the whole house, on a recovering ISP0
+          # while every tier had already moved to ISP2. `best` is never a
+          # yielded link while a healthy one exists, so this only ever moves
+          # main toward health. Same hold as any promotion.
+          :if (([:tonum ($ispYield->$ispPrimary)] = 1) && ([:tonum ($ispYield->$best)] = 0)) do={
+            :set ispPrimary $best
+            :set ispLastSw $ispTick
+            :set why "primary-yielded"
+            :set ispSwCount ($ispSwCount + 1)
+          }
+        }
+      }
+    }
+  }
+}
+
+# Device tiers. Each via-ispN table belongs to a class of devices (work on
+# ISP0, household on ISP1) and normally keeps its own ISP at distance 1 --
+# the point of tiering is that it is sticky, not that it re-optimises. It
+# yields that slot only when its link is genuinely broken, at which point the
+# table ranks like main and the class moves to the best link left.
+#
+# Hysteresis on purpose: yield below 500, reclaim only above 800. A single bad
+# EWMA sample costs 30%, so 1000 -> 700 -> 490 means roughly two consecutive
+# ticks of real loss before a class is evacuated, and a long clean run before
+# it goes back. Without the gap a link hovering near the threshold would drag
+# its whole device class back and forth.
+:for i from=0 to=2 do={
+  :local r [:tonum ($ispRep->$i)]
+  :local y0 [:tonum ($ispYield->$i)]
+  :if (([:tonum ($hard->$i)] = 1) || ($r < 500000)) do={ :set ($ispYield->$i) 1 }
+  :if (([:tonum ($hard->$i)] = 0) && ($r > 800000)) do={ :set ($ispYield->$i) 0 }
+  :if ([:tonum ($ispYield->$i)] != $y0) do={ :set ($ispYieldCount->$i) ([:tonum ($ispYieldCount->$i)] + 1) }
+}
+
+# Changing the distance does not move traffic by itself. FastTracked flows keep
+# the srcnat binding they were established with, so after a failover they sit on
+# the dead link until they time out -- measured on 2026-09-19, when 52 of them
+# stayed on ISP0 after the route had already changed. On a hard failover those
+# connections are broken anyway, so dropping their conntrack entries costs
+# nothing and is the difference between recovering in seconds and hanging for
+# minutes. Only the failed link's own entries are touched, matched on the WAN
+# address it was masquerading to.
+# Fired on ANY link going hard-down, not just the one main happened to be
+# using. The earlier version keyed off why="primary-down", which only fires
+# when main's primary changes -- so a tier yielding flushed nothing. That was
+# masked on 2026-09-20 because ISP0 was both main's primary and the work tier's
+# preference, and one flush covered both. Had Vianet held main while Worldlink
+# died, work devices would have yielded correctly and then hung on dead NAT
+# bindings until they timed out.
+:for i from=0 to=2 do={
+  :if (([:tonum ($hard->$i)] = 1) && ([:tonum ($ispPrevHard->$i)] = 0)) do={
+    :set ($ispHardCount->$i) ([:tonum ($ispHardCount->$i)] + 1)
+    :local ad [/ip/address/find interface~($ifn->$i)]
+    :if ([:len $ad] > 0) do={
+      :local a [/ip/address/get ($ad->0) address]
+      :local ip [:pick $a 0 [:find $a "/"]]
+      :set why ($why . " flush:" . ($nm->$i) . "@" . $ip)
+      # Removed one at a time, errors swallowed. A bulk remove takes a list of
+      # ids from `find` and then deletes them; conntrack entries expire on their
+      # own in between, so the delete hits an id that is already gone, RouterOS
+      # raises "no such item" and ABORTS THE WHOLE SCRIPT. Everything below this
+      # line -- including the distance enforcement that is the entire point of
+      # the tick -- is then skipped, and the failover waits for the next run.
+      # Observed twice on 2026-09-28 (20:36:46 and 20:38:26): a hard-down that
+      # should have moved routes immediately took a full extra tick. This is the
+      # immediate-failover path, so a whole tick is the worst place to lose one.
+      :if ($ispShadow = 0) do={
+        :local missed 0
+        :foreach c in=[/ip/firewall/connection/find reply-dst-address~$ip] do={
+          :onerror e in={ /ip/firewall/connection/remove $c } do={ :set missed ($missed + 1) }
+        }
+        :if ($missed > 0) do={ :set why ($why . "(-" . $missed . ")") }
+      }
+    }
+  }
+  :set ($ispPrevHard->$i) ($hard->$i)
+}
+
+# Distance carries the whole decision now. The old scripts toggled `disabled`,
+# which meant a demoted link was invisible rather than merely less preferred,
+# and left the route list flickering. A hard-down link is pushed past every
+# healthy one instead of being removed, so it can climb back on its own.
+#
+# Four tables are managed, not one. `main` serves anything not assigned to a
+# tier and follows the damped primary. Each via-ispN table serves a class of
+# devices and prefers its own ISP, yielding only when that link is broken.
+# Every table lists all three ISPs so any class can be evacuated anywhere.
+
+# Rank the three, best first: links that have not yielded ahead of links that
+# have, and by score within each group -- the same rule as `best` above, for
+# the same reason. Selection sort over three elements -- not elegant, but
+# RouterOS has no sort and three is three.
+:local ord [:toarray "0,1,2"]
+:for a from=0 to=1 do={
+  :for b from=($a + 1) to=2 do={
+    :local ia [:tonum ($ord->$a)]
+    :local ib [:tonum ($ord->$b)]
+    :local ya [:tonum ($ispYield->$ia)]
+    :local yb [:tonum ($ispYield->$ib)]
+    :if (($yb < $ya) || (($yb = $ya) && ([:tonum ($score->$ib)] > [:tonum ($score->$ia)]))) do={
+      :set ($ord->$a) $ib
+      :set ($ord->$b) $ia
+    }
+  }
+}
+
+:local tbls [:toarray "main,via-isp0,via-isp1,via-isp2"]
+:local chg ""
+
+:for t from=0 to=3 do={
+  :local tname ($tbls->$t)
+  # Who holds distance 1 here. main follows the damped primary; a tier table
+  # holds its own ISP unless that link has yielded, in which case it ranks
+  # like main and the class lands on the best link available.
+  :local top -1
+  :if ($t = 0) do={
+    :set top $ispPrimary
+  } else={
+    :local pref ($t - 1)
+    :if ([:tonum ($ispYield->$pref)] = 0) do={
+      :set top $pref
+    } else={
+      :set top [:tonum ($ord->0)]
+    }
+  }
+  :local want [:toarray "0,0,0"]
+  :set ($want->$top) 1
+  :local nx 2
+  :for k from=0 to=2 do={
+    :local idx [:tonum ($ord->$k)]
+    :if ($idx != $top) do={
+      :set ($want->$idx) $nx
+      :set nx ($nx + 1)
+    }
+  }
+  :for i from=0 to=2 do={
+    :if ([:tonum ($hard->$i)] = 1) do={ :set ($want->$i) ([:tonum ($want->$i)] + 50) }
+  }
+  :for i from=0 to=2 do={
+    # Matched with the find filter's own gateway~ regex. Doing it with
+    # [:find $gateway "wan-ispN"] looks equivalent and is not: :typeof returns
+    # "nil" on a miss, not "nothing", so a test against "nothing" is true for
+    # every route and each ISP silently matched all three.
+    :foreach r in=[/ip/route/find dst-address="0.0.0.0/0" routing-table=$tname gateway~($ifn->$i)] do={
+      :local cd [/ip/route/get $r distance]
+      :local dis [/ip/route/get $r disabled]
+      :if (($cd != [:tonum ($want->$i)]) || $dis) do={
+        :set chg ($chg . $tname . "/" . ($nm->$i) . " " . $cd . ">" . ($want->$i) . " ")
+        # disabled=no heals anything the old health scripts left switched off.
+        :if ($ispShadow = 0) do={ /ip/route/set $r distance=[:tonum ($want->$i)] disabled=no }
+      }
+    }
+  }
+}
+
+# A line every tick would be 8640 a day and would push everything else out of
+# the log buffer, losing exactly the incident history this was built to keep.
+# Log on change, and otherwise a heartbeat every 90 ticks (15 minutes).
+:local tag "ENFORCE"
+:if ($ispShadow = 1) do={ :set tag "SHADOW" }
+:if (($chg != "") || ($why != "") || (($ispTick % 90) = 0)) do={
+  :log warning ("ISP-control " . $tag . " rep=" . ([:tonum ($ispRep->0)]/1000) . "/" . ([:tonum ($ispRep->1)]/1000) . "/" . ([:tonum ($ispRep->2)]/1000) . " loss=" . ($lp->0) . "/" . ($lp->1) . "/" . ($lp->2) . " up=" . ($upc->0) . "/" . ($upc->1) . "/" . ($upc->2) . " yield=" . ($ispYield->0) . ($ispYield->1) . ($ispYield->2) . " primary=" . ($nm->$ispPrimary) . " tick=" . $ispTick . " " . $why . " " . $chg)
+}
+}

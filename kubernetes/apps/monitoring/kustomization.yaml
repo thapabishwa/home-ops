@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+resources:
+  - namespace.yaml
+  - prometheus-credentials.sops.yaml
+  - mktxp-credentials.sops.yaml
+  - grafana-admin.sops.yaml
+  - ocirepository.yaml
+  - kube-prometheus-stack.yaml
+  - middleware.yaml
+  - mktxp.yaml
+  - blackbox.yaml
+  - health.yaml
+  - wan-rules.yaml
+  - home-rules.yaml
+configMapGenerator:
+  - name: blackbox-config
+    files: [blackbox.yml]

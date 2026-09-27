@@ -1,0 +1,11 @@
+[Unit]
+Description=Disable Intel turbo - closed-lid rack operation, bound peak temperature
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

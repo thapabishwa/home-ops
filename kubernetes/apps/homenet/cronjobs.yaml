@@ -1,0 +1,146 @@
+# The ISP event watcher and loss sampler.
+#
+# Never run these alongside another copy of the scripts -- two writers on
+# isp-events.log, or two counter baselines, corrupt both records. They were
+# first deployed suspended and enabled only once the existing history and
+# counter state were in homenet-data.
+#
+# Schedules are UTC, like the timestamps in the logs. Both run on the node
+# holding homenet-data (the volume pins them), same as dash-agent.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: isp-watch
+spec:
+  schedule: "* * * * *"
+  timeZone: Etc/UTC
+  suspend: false
+  # A run that cannot start within its minute is skipped, not stacked: the
+  # next one sees the same state anyway.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 50
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 55
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app: isp-watch
+        spec:
+          restartPolicy: Never
+          securityContext: &podsec
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: isp-watch
+              image: ghcr.io/thapabishwa/homenet-agent:1.0.0
+              command: [/opt/homenet/isp-watch.sh]
+              env: &env
+                - { name: STATE_DIR, value: /data/state }
+                - { name: LOG_DIR, value: /data/log }
+                - { name: CONF_DIR, value: /etc/homenet }
+              securityContext: &restricted
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources: &resources
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts: &mounts
+                - { name: data, mountPath: /data }
+                - { name: scripts, mountPath: /opt/homenet, readOnly: true }
+                - { name: credentials, mountPath: /etc/homenet, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes: &volumes
+            - name: data
+              persistentVolumeClaim:
+                claimName: homenet-data
+            - name: scripts
+              configMap:
+                name: homenet-scripts
+                defaultMode: 0555
+            - name: credentials
+              secret:
+                secretName: homenet-credentials
+                defaultMode: 0440
+                optional: true
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: isp-log
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  suspend: false
+  # isp-log differences cumulative counters against its last run, so its
+  # cadence is part of the data: a late run is skipped rather than retried.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 60
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 240
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app: isp-log
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: isp-log
+              image: ghcr.io/thapabishwa/homenet-agent:1.0.0
+              command: [/opt/homenet/isp-log.sh]
+              env:
+                - { name: STATE_DIR, value: /data/state }
+                - { name: LOG_DIR, value: /data/log }
+                - { name: CONF_DIR, value: /etc/homenet }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts:
+                - { name: data, mountPath: /data }
+                - { name: scripts, mountPath: /opt/homenet, readOnly: true }
+                - { name: credentials, mountPath: /etc/homenet, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: homenet-data
+            - name: scripts
+              configMap:
+                name: homenet-scripts
+                defaultMode: 0555
+            - name: credentials
+              secret:
+                secretName: homenet-credentials
+                defaultMode: 0440
+                optional: true
+            - name: tmp
+              emptyDir: {}

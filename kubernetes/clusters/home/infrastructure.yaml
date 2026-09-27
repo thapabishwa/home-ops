@@ -1,0 +1,45 @@
+# Cluster plumbing, in two steps, because the second needs the first's CRDs:
+#
+#   infra-controllers  MetalLB, Traefik, cert-manager, Multus and the rest
+#                      (with their CRDs)
+#   infra-configs      MetalLB's address pools and the private CA -- an
+#                      IPAddressPool or a ClusterIssuer cannot be applied
+#                      until its controller has installed the CRD
+#
+# apps.yaml depends on infra-configs, so nothing asks for a LoadBalancer
+# address before there is a pool to hand one out.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-controllers
+  namespace: flux-system
+spec:
+  interval: 10m
+  path: ./kubernetes/infrastructure/controllers
+  prune: true
+  wait: true
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-configs
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra-controllers
+  interval: 10m
+  path: ./kubernetes/infrastructure/configs
+  prune: true
+  wait: true
+  timeout: 5m
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

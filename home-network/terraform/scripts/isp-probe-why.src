@@ -1,0 +1,79 @@
+# ISP-probe-why -- when a netwatch probe goes down, re-test it once from the
+# router and log WHY it failed.
+#
+# Netwatch reports that a tcp-conn probe is down, never why. The difference
+# matters: a timeout means packets are being lost on the path, which is the
+# link; a refused or reset connection means the target is actively rejecting
+# us, which is what rate limiting looks like. A second prober elsewhere on the
+# LAN cannot answer this -- it starts from a different device, through the
+# forward chain, NAT and the queues -- so the re-test runs here, from the
+# router, and follows the same destination pin to the same ISP.
+#
+# Deliberately NOT part of ISP-control. A re-test blocks for up to its timeout,
+# and during a total outage nine of them would stall the controller for half
+# a minute -- delaying the very failover the probes exist to trigger. This runs
+# on its own scheduler, and nothing here feeds back into routing.
+#
+# Each down event is re-tested exactly once: a probe is keyed by its name and
+# the `since` timestamp of its current state, and marked BEFORE the re-test so
+# an overlapping run started by the next tick skips it. At most three re-tests
+# per run, so one run never blocks for longer than about nine seconds.
+#
+# Output, one line per down event, with fetch's own error text kept:
+#   ... retest failed, timeout: failure: timeout connecting
+#   ... retest failed, refused: failure: Connection refused
+#   ... retest failed, no route: failure: Network unreachable
+#   ... retest connected
+#   ... retest connected (<error>)
+# A timeout, a refusal or a reset means the TCP connection failed; "unreachable"
+# means it was never attempted. Those strings were checked against fetch on this
+# router. Note the case of the rest: an HTTP answer arrives as "failure: Status
+# 308, Permanent Redirect", capital S, and RouterOS matching is case-sensitive,
+# so matching on "status" to detect it would have filed every redirect as a
+# failed connection. Any error that came AFTER the connection was made (a TLS
+# problem, an HTTP error page) counts as connected: the path worked a moment
+# after netwatch said it did not.
+#
+# The unreachable case was added on 2026-09-28, and it is the reason this script
+# had been reporting the opposite of the truth. "Network unreachable" and "Host
+# is unreachable" are raised at route lookup, before a packet leaves -- yet they
+# fell through to the default and were logged as "retest connected" roughly two
+# hundred times in one day. They are not a minor error class here: the pins use
+# lookup-only-in-table, which has no fallthrough, so "Network unreachable" means
+# that ISP's route went INACTIVE, which means its CPE stopped answering. That is
+# the single most diagnostic line this script can emit.
+
+:global ispWhySeen
+:if ([:typeof $ispWhySeen] = "nothing") do={ :set ispWhySeen [:toarray ""] }
+
+:local budget 3
+# Only probes that are down AND have failed at least one test. A probe that
+# was just created, or has not run since a reboot, is not "up" either -- on
+# 2026-09-27 the three new Cloudflare probes were each re-tested seconds after
+# the apply that created them, one with an empty `since`. Those are not
+# failures and must not look like them.
+:foreach n in=[/tool/netwatch/find where comment~"-probe\$" and status="down"] do={
+  :if (($budget > 0) && ([/tool/netwatch/get $n failed-tests] > 0)) do={
+    :local name [/tool/netwatch/get $n name]
+    :local host [/tool/netwatch/get $n host]
+    :local since [:tostr [/tool/netwatch/get $n since]]
+    :if (($ispWhySeen->$name) != $since) do={
+      :set ($ispWhySeen->$name) $since
+      :set budget ($budget - 1)
+      # HTTPS without certificate checks: only the connection matters here.
+      :local result "retest connected"
+      :onerror e in={
+        /tool/fetch url=("https://" . $host . "/") check-certificate=no keep-result=no idle-timeout=3s
+      } do={
+        :set result ("retest connected (" . $e . ")")
+        :if ($e~"timeout") do={ :set result ("retest failed, timeout: " . $e) }
+        :if ($e~"refused") do={ :set result ("retest failed, refused: " . $e) }
+        :if ($e~"reset") do={ :set result ("retest failed, reset: " . $e) }
+        # Covers both "Network unreachable" and "Host is unreachable"; both are
+        # lowercase in fetch's output and RouterOS matching is case-sensitive.
+        :if ($e~"unreachable") do={ :set result ("retest failed, no route: " . $e) }
+      }
+      :log warning ("ISP-probe-why " . $name . " down since " . $since . ": " . $result)
+    }
+  }
+}

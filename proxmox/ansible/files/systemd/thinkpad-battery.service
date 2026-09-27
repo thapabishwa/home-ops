@@ -1,0 +1,13 @@
+[Unit]
+Description=Cap battery charge at 80% - permanent AC operation, battery kept for UPS duty
+After=multi-user.target
+
+[Service]
+Type=oneshot
+# End must be written before start: firmware rejects start >= end.
+ExecStart=/bin/sh -c 'echo 80 > /sys/class/power_supply/BAT0/charge_control_end_threshold'
+ExecStart=/bin/sh -c 'echo 75 > /sys/class/power_supply/BAT0/charge_control_start_threshold'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

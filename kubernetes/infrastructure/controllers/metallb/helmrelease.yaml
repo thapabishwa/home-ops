@@ -1,0 +1,28 @@
+# Gives LoadBalancer Services real LAN addresses, from the pool in
+# ../../configs/metallb-pool.yaml.
+#
+# Layer 2 mode: the node holding an address answers ARP for it. No router
+# configuration is needed, which matters here -- the hEX is managed by
+# Terraform and its routing is busy enough with three ISPs.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metallb
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: metallb
+      version: 0.16.1
+      sourceRef:
+        kind: HelmRepository
+        name: metallb
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+  values:
+    # The chart defaults to the frr-k8s backend, which is for BGP. L2 needs
+    # none of it.
+    frrk8s:
+      enabled: false

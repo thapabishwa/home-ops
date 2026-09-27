@@ -1,0 +1,123 @@
+# Homepage's data feeds. In-cluster, Homepage reads
+# http://dash-agent.homenet.svc.cluster.local/{wan,switch,power}.json.
+# dash.internal is for the pve host, which PUTs power.json, and for a human
+# who wants to look.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dash-agent
+spec:
+  replicas: 1
+  # One writer for the caches, and the volume is ReadWriteOnce.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dash-agent
+  template:
+    metadata:
+      labels:
+        app: dash-agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: dirs
+          image: ghcr.io/thapabishwa/homenet-agent:1.0.0
+          command: [mkdir, -p, /data/www, /data/state, /data/log]
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      containers:
+        - name: dash-agent
+          image: ghcr.io/thapabishwa/homenet-agent:1.0.0
+          command: [python3, /opt/homenet/dash-agent.py]
+          env: &env
+            - { name: WWW_DIR, value: /data/www }
+            - { name: STATE_DIR, value: /data/state }
+            - { name: LOG_DIR, value: /data/log }
+            - { name: CONF_DIR, value: /etc/homenet }
+            - { name: SCRIPT_DIR, value: /opt/homenet }
+            # touch this (kubectl exec) to stop switch scrapes while you use
+            # the switch's one-session web UI
+            - { name: SWITCH_PAUSE_FILE, value: /data/state/switch-scrape.pause }
+            - { name: DASH_ADDR, value: 0.0.0.0 }
+            - { name: DASH_PORT, value: "8099" }
+          ports:
+            - { name: http, containerPort: 8099 }
+          readinessProbe:
+            tcpSocket:
+              port: http
+          securityContext: *restricted
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts: &mounts
+            - { name: data, mountPath: /data }
+            - { name: scripts, mountPath: /opt/homenet, readOnly: true }
+            - { name: credentials, mountPath: /etc/homenet, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes: &volumes
+        - name: data
+          persistentVolumeClaim:
+            claimName: homenet-data
+        - name: scripts
+          configMap:
+            name: homenet-scripts
+            defaultMode: 0555
+        # hex-api.conf and switch-scrape.conf, from secret.sops.yaml
+        # (SOPS-encrypted). Optional so the pod still starts without it;
+        # the collectors then log "credentials not set" and serve stale data.
+        - name: credentials
+          secret:
+            secretName: homenet-credentials
+            defaultMode: 0440
+            optional: true
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dash-agent
+  # The ServiceMonitor selects on this.
+  labels:
+    app: dash-agent
+spec:
+  selector:
+    app: dash-agent
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dash-agent
+  annotations:
+    cert-manager.io/cluster-issuer: internal-ca
+spec:
+  tls:
+    - hosts: [dash.internal]
+      secretName: dash-internal-tls
+  rules:
+    - host: dash.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dash-agent
+                port:
+                  name: http

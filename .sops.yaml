@@ -1,0 +1,12 @@
+# SOPS: Kubernetes Secrets are committed encrypted, to two recipients -- either
+# one alone can decrypt:
+#   age  the cluster's key; Flux decrypts with it (flux-system/sops-age)
+#   pgp  the owner's personal GPG key, the
+#        recovery path if the age key is ever lost
+# Only data/stringData is encrypted; names and metadata stay readable, so a
+# diff still shows which Secret changed.
+creation_rules:
+  - path_regex: kubernetes/.*\.sops\.ya?ml$
+    encrypted_regex: ^(data|stringData)$
+    age: age1sjmlg66lxtmwt4krugp6nncqv4mz7y4mwsau5p8ucjhe837y73gqfjdvw3
+    pgp: 389CE330EA884FC9703F4D7EB5ECACA8E170DF19

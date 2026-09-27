@@ -1,0 +1,54 @@
+# The household's private CA.
+#
+#   selfsigned       bootstraps exactly one thing: the root below
+#   internal-root-ca a 10-year ECDSA root, kept as a Secret in cert-manager
+#   internal-ca      the ClusterIssuer every Ingress uses
+#
+# The root is name-constrained to .internal. Trusting it on a laptop or a
+# phone then cannot be turned against any other site -- even with its key, a
+# certificate for anything outside .internal would be rejected by the device.
+#
+# Trust it once per device (see ../../README.md). The key lives only in the
+# cluster: rebuild the cluster without restoring the Secret and a new root is
+# minted, and every device has to trust again.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: Home Internal CA
+  subject:
+    organizations: [Home]
+  secretName: internal-root-ca
+  duration: 87600h # 10 years
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Renewing must not mint a new key, or every device's trust breaks.
+    rotationPolicy: Never
+  nameConstraints:
+    critical: true
+    permitted:
+      dnsDomains:
+        - internal
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca
+spec:
+  ca:
+    secretName: internal-root-ca

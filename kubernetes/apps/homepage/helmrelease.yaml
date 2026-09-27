@@ -1,0 +1,425 @@
+# The household dashboard: http://home.internal
+#
+# DNS sends home.internal to Traefik (10.0.0.30). The wan/switch/power widget
+# feeds come from dash-agent in the homenet namespace, fetched server-side
+# over the cluster network.
+#
+# Homepage also reads pod status from the Kubernetes API, which is why it
+# carries a ServiceAccount and a read-only ClusterRole.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: homepage
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: app-template
+  values:
+    controllers:
+      homepage:
+        serviceAccount:
+          identifier: homepage
+        pod:
+          # app-template turns token mounting off by default; Homepage needs
+          # it to talk to the API.
+          automountServiceAccountToken: true
+        containers:
+          app:
+            image:
+              repository: ghcr.io/gethomepage/homepage
+              tag: v2.4.0
+            env:
+              # Homepage answers 400 to any Host not listed here: its public
+              # name, and the in-cluster name the health check probes.
+              HOMEPAGE_ALLOWED_HOSTS: >-
+                home.internal,homepage.homepage.svc.cluster.local:3000
+            # The widgets' HOMEPAGE_VAR_* credentials, from secret.sops.yaml
+            # (SOPS-encrypted). Optional, so a missing Secret costs widgets,
+            # not the dashboard.
+            envFrom:
+              - secretRef:
+                  name: homepage-secrets
+                  optional: true
+            resources:
+              requests:
+                cpu: 10m
+                memory: 128Mi
+              limits:
+                memory: 512Mi
+
+    serviceAccount:
+      homepage: {}
+
+    rbac:
+      roles:
+        homepage:
+          type: ClusterRole
+          rules:
+            - apiGroups: [""]
+              resources: [namespaces, pods, nodes]
+              verbs: [get, list]
+            - apiGroups: [networking.k8s.io]
+              resources: [ingresses]
+              verbs: [get, list]
+            - apiGroups: [gateway.networking.k8s.io]
+              resources: [httproutes, gateways]
+              verbs: [get, list]
+            - apiGroups: [metrics.k8s.io]
+              resources: [nodes, pods]
+              verbs: [get, list]
+      bindings:
+        homepage:
+          type: ClusterRoleBinding
+          roleRef:
+            identifier: homepage
+          subjects:
+            - identifier: homepage
+
+    service:
+      app:
+        controller: homepage
+        ports:
+          http:
+            port: 3000
+
+    # Through Traefik on 10.0.0.30, where DNS points home.internal.
+    ingress:
+      app:
+        annotations:
+          cert-manager.io/cluster-issuer: internal-ca
+          traefik.ingress.kubernetes.io/router.middlewares: homepage-redirect-https@kubernetescrd
+        tls:
+          - hosts: [home.internal]
+            secretName: home-internal-tls
+        hosts:
+          - host: home.internal
+            paths:
+              - path: /
+                pathType: Prefix
+                service:
+                  identifier: app
+                  port: http
+
+    configMaps:
+      config:
+        data:
+          kubernetes.yaml: |
+            mode: cluster
+
+          settings.yaml: |
+            title: Home
+            headerStyle: clean
+            color: slate
+            showStats: true
+            layout:
+              Media:
+                style: row
+                columns: 3
+              Infrastructure:
+                style: row
+                columns: 3
+              Platform:
+                style: row
+                columns: 4
+
+          # The cluster's CPU and memory, overall and per node, from
+          # metrics-server.
+          widgets.yaml: |
+            - kubernetes:
+                cluster:
+                  show: true
+                  cpu: true
+                  memory: true
+                  showLabel: true
+                  label: cluster
+                nodes:
+                  show: true
+                  cpu: true
+                  memory: true
+                  showLabel: true
+
+            - datetime:
+                text_size: xl
+                format:
+                  dateStyle: short
+                  timeStyle: short
+                  hour12: false
+
+            - search:
+                provider: duckduckgo
+                target: _blank
+
+          # Direct-access names still resolve and bypass the proxy:
+          #   pve.internal:8006  jellyfin-ct.internal:8096
+          #   qbit-ct.internal:8090  switch.internal
+          bookmarks.yaml: |
+            []
+
+          services.yaml: |
+            - Media:
+                - Jellyfin:
+                    href: https://jellyfin.internal
+                    siteMonitor: http://10.0.0.10:8096
+                    description: Media server
+                    icon: jellyfin.png
+                    # Streams now playing and library counts. The key is a
+                    # Jellyfin API key made just for Homepage (Dashboard >
+                    # API Keys), so it can be revoked on its own.
+                    # version 2: the current Jellyfin API. The default (v1)
+                    # uses /emby/...?api_key= URLs, which Jellyfin 12 removed.
+                    widget:
+                      type: jellyfin
+                      version: 2
+                      url: http://10.0.0.10:8096
+                      key: "{{ "{{" }}HOMEPAGE_VAR_JELLYFIN_KEY{{ "}}" }}"
+                      enableBlocks: true
+                      enableNowPlaying: true
+                      showEpisodeNumber: true
+                - qBittorrent:
+                    href: https://qbit.internal
+                    # The Service, not 10.0.0.11: that address is a macvlan on
+                    # the worker, which pods on the worker cannot reach.
+                    siteMonitor: http://qbittorrent.media.svc.cluster.local:8090
+                    description: Download client — traffic split across ISP1 and ISP2
+                    icon: qbittorrent.png
+                    # Live download/upload speed and download counts.
+                    widget:
+                      type: qbittorrent
+                      url: http://qbittorrent.media.svc.cluster.local:8090
+                      username: "{{ "{{" }}HOMEPAGE_VAR_QBIT_USER{{ "}}" }}"
+                      password: "{{ "{{" }}HOMEPAGE_VAR_QBIT_PASS{{ "}}" }}"
+                - Unmanic:
+                    href: https://unmanic.internal
+                    siteMonitor: http://10.0.0.12:8888
+                    description: Library optimiser — HEVC re-encode on AWS workers, integrity-guarded
+                    icon: unmanic.png
+                    widget:
+                      type: unmanic
+                      url: http://10.0.0.12:8888
+
+            - Infrastructure:
+                - Proxmox:
+                    href: https://proxmox.internal
+                    siteMonitor: https://10.0.0.3:8006
+                    description: Hypervisor — VMs, containers, console
+                    icon: proxmox.png
+                    widgets:
+                      - type: proxmox
+                        url: https://10.0.0.3:8006
+                        username: homepage@pve!dashboard
+                        # app-template runs values through Helm's tpl, so
+                        # Homepage's own double-brace placeholder is escaped
+                        # to come out literally. Comments here are templated
+                        # too: no double braces in them.
+                        password: "{{ "{{" }}HOMEPAGE_VAR_PROXMOX_TOKEN{{ "}}" }}"
+                        node: pve
+                      # Battery and thermal state. Proxmox runs no
+                      # node_exporter, so power-json.sh on the host measures
+                      # this and PUTs it to dash-agent (dash.internal).
+                      - type: customapi
+                        url: http://dash-agent.homenet.svc.cluster.local/power.json
+                        refreshInterval: 30000
+                        method: GET
+                        display: block
+                        mappings:
+                          - field: charge_pct
+                            label: battery
+                            format: number
+                            suffix: "%"
+                          - field: state
+                            label: power
+                            format: text
+                          - field: temp_c
+                            label: cpu
+                            format: number
+                            suffix: "C"
+                          - field: fan_rpm
+                            label: fan
+                            format: number
+                            suffix: "rpm"
+                - MikroTik hEX:
+                    href: http://10.0.0.1
+                    siteMonitor: http://10.0.0.1
+                    description: Router — three-ISP failover by device tier, VLAN trunk to the switch
+                    icon: mikrotik.png
+                    # Probe health and failover state from the hEX's REST API,
+                    # turned into JSON by wan-json.sh in dash-agent.
+                    # Three probes per ISP, on three independent operators, so
+                    # one provider's outage cannot read as an ISP failure; rtt
+                    # is the lowest TCP connect time among those up. `wan` is
+                    # the default route actually carrying traffic, so a silent
+                    # failover is visible here rather than only in the
+                    # router's log.
+                    widget:
+                      type: customapi
+                      url: http://dash-agent.homenet.svc.cluster.local/wan.json
+                      # The agent collects on fetch with a 30s floor, so this
+                      # is how often a tab left open pokes the router -- not a
+                      # background poll.
+                      refreshInterval: 60000
+                      method: GET
+                      display: block
+                      mappings:
+                        - field: active
+                          label: carrying
+                          format: text
+                        - field: uptime
+                          label: uptime
+                          format: text
+                        - field:
+                            ISP0: probes
+                          label: ISP0 wlink
+                          format: text
+                        - field:
+                            ISP0: rtt_ms
+                          label: rtt
+                          format: number
+                          suffix: "ms"
+                        - field:
+                            ISP1: probes
+                          label: ISP1 vianet
+                          format: text
+                        - field:
+                            ISP1: rtt_ms
+                          label: rtt
+                          format: number
+                          suffix: "ms"
+                        - field:
+                            ISP2: probes
+                          label: ISP2 ntfiber
+                          format: text
+                        - field:
+                            ISP2: rtt_ms
+                          label: rtt
+                          format: number
+                          suffix: "ms"
+                - TL-SG108E:
+                    href: https://tplink.internal
+                    description: Switch — ISP0-3 on VLAN 10/20/30/40, LAN on 100
+                    icon: tp-link.png
+                    # Scraped from the web UI by switch-json.sh in dash-agent --
+                    # an Easy Smart switch has no SNMP. The switch allows one
+                    # web session, so polling harder would fight with anyone
+                    # using the UI.
+                    widget:
+                      type: customapi
+                      url: http://dash-agent.homenet.svc.cluster.local/switch.json
+                      # The scrape happens on fetch, so this is how often a
+                      # tab left open will poke the switch. The agent
+                      # enforces a 60s floor too.
+                      refreshInterval: 3600000
+                      method: GET
+                      display: block
+                      mappings:
+                        - field: gig
+                          label: "1G"
+                          format: number
+                        - field: sub_gig
+                          label: "<1G"
+                          format: number
+                        - field: down
+                          label: down
+                          format: number
+                        - field: err_total
+                          label: errors
+                          format: number
+
+            - Platform:
+                - Flux:
+                    href: https://flux.internal
+                    description: GitOps — what the cluster runs, reconciled from git
+                    icon: flux-cd.png
+                    namespace: flux-system
+                    app: flux-operator
+                - Health checks:
+                    href: https://prometheus.internal/alerts
+                    description: Everything on this page, probed every minute
+                    icon: mdi-heart-pulse
+                    widget:
+                      type: prometheusmetric
+                      url: http://prometheus-operated.monitoring.svc.cluster.local:9090
+                      refreshInterval: 60000
+                      metrics:
+                        - label: failing
+                          query: count(probe_success{job="household-health"} == 0) or vector(0)
+                          format:
+                            type: number
+                        - label: checks
+                          query: count(probe_success{job="household-health"})
+                          format:
+                            type: number
+                - Grafana:
+                    href: https://grafana.internal
+                    description: The cluster's dashboards; the house's are in Grafana Cloud
+                    icon: grafana.png
+                    namespace: monitoring
+                    podSelector: app.kubernetes.io/name=grafana
+                    # As admin: the widget reads /api/admin/stats, which only
+                    # a Grafana server admin may. The login is a copy of
+                    # monitoring/grafana-admin -- change both together.
+                    widget:
+                      type: grafana
+                      version: 2
+                      url: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local
+                      username: "{{ "{{" }}HOMEPAGE_VAR_GRAFANA_USER{{ "}}" }}"
+                      password: "{{ "{{" }}HOMEPAGE_VAR_GRAFANA_PASS{{ "}}" }}"
+                - Prometheus:
+                    href: https://prometheus.internal
+                    description: Metrics and alert rules; ISP data forwarded to Grafana Cloud
+                    icon: prometheus.png
+                    namespace: monitoring
+                    podSelector: app.kubernetes.io/name=prometheus
+                    widget:
+                      type: prometheus
+                      url: http://prometheus-operated.monitoring.svc.cluster.local:9090
+                - Household CA:
+                    href: http://ca.internal
+                    description: Root certificate — install once on a new device
+                    icon: mdi-certificate-outline
+
+          docker.yaml: |
+            {}
+
+          custom.css: ""
+
+          # Follow the OS light/dark setting, live. Homepage picks its initial
+          # theme from prefers-color-scheme only when nothing is saved, then
+          # saves it to localStorage("theme-mode") and never looks at the OS
+          # again. Keep the saved value equal to the OS setting; reload when
+          # they differ so React starts clean.
+          custom.js: |
+            (function () {
+              var mq = window.matchMedia("(prefers-color-scheme: dark)");
+              function sync() {
+                var want = mq.matches ? "dark" : "light";
+                try {
+                  if (localStorage.getItem("theme-mode") !== want) {
+                    localStorage.setItem("theme-mode", want);
+                    location.reload();
+                  }
+                } catch (e) {
+                  // storage blocked (private mode): leave Homepage's own default alone
+                }
+              }
+              sync();
+              mq.addEventListener("change", sync);
+            })();
+
+    persistence:
+      config:
+        type: configMap
+        identifier: config
+        globalMounts:
+          - { path: /app/config/kubernetes.yaml, subPath: kubernetes.yaml }
+          - { path: /app/config/settings.yaml, subPath: settings.yaml }
+          - { path: /app/config/widgets.yaml, subPath: widgets.yaml }
+          - { path: /app/config/services.yaml, subPath: services.yaml }
+          - { path: /app/config/bookmarks.yaml, subPath: bookmarks.yaml }
+          - { path: /app/config/docker.yaml, subPath: docker.yaml }
+          - { path: /app/config/custom.css, subPath: custom.css }
+          - { path: /app/config/custom.js, subPath: custom.js }
+      logs:
+        type: emptyDir
+        globalMounts:
+          - path: /app/config/logs

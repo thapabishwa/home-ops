@@ -1,0 +1,114 @@
+# The hEX exporter. Stateless: config here, credentials in a Secret.
+#
+# The router account is pinned to 10.0.0.20/31 -- both node addresses -- because
+# a pod reaches the router from whichever node it lands on.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mktxp-config
+data:
+  mktxp.conf: |
+    [hex]
+        hostname = 10.0.0.1
+        port = 8728
+        credentials_file = /etc/mktxp-credentials/creds.yaml
+        enabled = True
+        use_ssl = False
+        interface = True
+        route = True
+        netwatch = True
+        poe = False
+        dhcp = True
+        dhcp_lease = True
+        firewall = True
+        monitor = True
+        check_for_updates = False
+  _mktxp.conf: |
+    [MKTXP]
+        listen = '0.0.0.0:49090'
+        socket_timeout = 5
+        initial_delay_on_failure = 120
+        max_delay_on_failure = 900
+        delay_inc_div = 5
+        bandwidth = False
+        verbose_mode = False
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mktxp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mktxp}
+  template:
+    metadata:
+      labels: {app: mktxp}
+    spec:
+      # 1000 is the image's own mktxp user. Named USER alone is not enough:
+      # kubelet refuses runAsNonRoot when it cannot resolve the name to a UID.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mktxp
+          # No args: the image's CMD is already ["mktxp","export"], and with no
+          # ENTRYPOINT an args override replaces the binary too.
+          image: ghcr.io/akpw/mktxp:2.0.3
+          ports:
+            - {name: metrics, containerPort: 49090}
+          readinessProbe:
+            exec:
+              command: [sh, -c, "wget -qO- 127.0.0.1:49090/metrics | grep -q mktxp_netwatch"]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 192Mi}
+          volumeMounts:
+            - {name: config, mountPath: /home/mktxp/mktxp, readOnly: true}
+            - {name: credentials, mountPath: /etc/mktxp-credentials, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: mktxp-config}
+        - name: credentials
+          secret: {secretName: mktxp-credentials}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mktxp
+  labels: {app: mktxp}
+spec:
+  selector: {app: mktxp}
+  ports:
+    - {name: metrics, port: 49090, targetPort: metrics}
+---
+# Scraped as job "mktxp", the Service's name -- which RouterUnreachable matches.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mktxp
+spec:
+  selector:
+    matchLabels: {app: mktxp}
+  endpoints:
+    - port: metrics
+      # Timeout close to the interval on purpose: waiting on the router is
+      # normal, and a timeout would read as the router being down.
+      interval: 30s
+      scrapeTimeout: 25s
+      # One router, one fixed identity. Without this every series carries the
+      # pod's name and address, and each restart starts a new set of series in
+      # Grafana Cloud.
+      relabelings:
+        - targetLabel: instance
+          replacement: mktxp:49090
+        - action: labeldrop
+          regex: pod|container|endpoint|namespace|service

@@ -1,0 +1,41 @@
+# The media library: pve's media disk (/mnt/pve/media), exported over NFS to
+# the two cluster nodes and shared by every app in this namespace.
+#
+# pve's /etc/exports maps every client user to uid/gid 100000 (all_squash) --
+# the uid that pve's unprivileged containers write as. Files written from a
+# pod and from a container on pve therefore have the same owner, whatever uid
+# the pod runs as.
+#
+# A statically bound PV rather than a provisioner: there is one export, and
+# the claim must never be able to delete it (Retain).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media-library
+spec:
+  capacity:
+    storage: 900Gi
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: media
+    name: library
+  mountOptions:
+    - nfsvers=4.2
+    - hard
+  nfs:
+    server: 10.0.0.3
+    path: /mnt/pve/media
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: library
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: media-library
+  resources:
+    requests:
+      storage: 900Gi

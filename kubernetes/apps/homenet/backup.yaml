@@ -1,0 +1,115 @@
+# Nightly restic snapshot of homenet-data (the ISP outage record) to pve's
+# media disk over NFS.
+#
+# Off the cluster, not off the laptop: this survives a lost node disk, a
+# deleted claim or a rebuilt cluster, but not losing the ThinkPad. The repo
+# password is in backup.sops.yaml, so git plus either SOPS key is enough to
+# read the backups back.
+#
+# The namespace is `restricted`, which forbids inline NFS volumes; hence a
+# statically bound PV over the same export the media apps use. Restore steps
+# are in docs/09-runbooks.md.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: homenet-backup-target
+spec:
+  capacity:
+    storage: 900Gi
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: homenet
+    name: backup-target
+  mountOptions:
+    - nfsvers=4.2
+    - hard
+  nfs:
+    server: 10.0.0.3
+    path: /mnt/pve/media
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-target
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: homenet-backup-target
+  resources:
+    requests:
+      storage: 900Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+spec:
+  # 03:00 in Kathmandu.
+  schedule: "15 21 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: backup
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: restic
+              image: restic/restic:0.19.1
+              command: [sh, -c]
+              args:
+                - |
+                  set -eu
+                  # Created on pve by proxmox/ansible. Not mkdir -p: the export squashes
+                  # every client to 100000, and the NFS server refuses a mkdir in the
+                  # root-owned top level before it notices the directory already exists.
+                  [ -d /target/backups ] || { echo "/target/backups missing: run proxmox/ansible"; exit 1; }
+                  restic cat config >/dev/null 2>&1 || restic init
+                  restic backup --host homenet --tag nightly /data
+                  restic forget --host homenet --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
+                  restic check
+              env:
+                - { name: RESTIC_REPOSITORY, value: /target/backups/restic-homenet }
+                - name: RESTIC_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: backup, key: password }
+                - { name: RESTIC_CACHE_DIR, value: /tmp/cache }
+                - { name: HOME, value: /tmp }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - { name: data, mountPath: /data, readOnly: true }
+                - { name: target, mountPath: /target }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: homenet-data
+                readOnly: true
+            - name: target
+              persistentVolumeClaim:
+                claimName: backup-target
+            - name: tmp
+              emptyDir: {}

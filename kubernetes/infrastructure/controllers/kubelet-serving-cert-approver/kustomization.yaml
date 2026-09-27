@@ -1,0 +1,14 @@
+# Approves the kubelets' serving-certificate requests, so metrics-server can
+# verify kubelet TLS instead of running with --kubelet-insecure-tls.
+#
+# Talos turns on serverTLSBootstrap (../../../talos/talos.tf), after which
+# each kubelet asks the API server for a serving certificate signed by the
+# cluster CA. Nothing in Kubernetes approves those by default; this does,
+# after checking the request really comes from the node it names.
+#
+# standalone-install.yaml is upstream's release manifest, vendored unchanged:
+# https://github.com/alex1989hu/kubelet-serving-cert-approver/blob/v0.12.1/deploy/standalone-install.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - standalone-install.yaml

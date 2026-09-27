@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: grafana-admin
+type: Opaque
+stringData:
+    admin-user: ENC[AES256_GCM,data:fl0wAtA=,iv:nFpVu+AXn/AFP0sJFxJFc0xfcqhcltJUHAVd6CObwkw=,tag:AWpzjGP0WlUprs3B+6qpeA==,type:str]
+    admin-password: ENC[AES256_GCM,data:eQsUQjO4LRoCcwytdnhuiibAGbed6zrOL9paXCCWdy4=,iv:1mTLBiUvFXQfZJyr+HvMjlwJ2dgc1NKo8XyIUUV6pF8=,tag:Luh7R6k1Tx7aUaAVt3F7YA==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOdUN4bVFKdE16RkNGRW1D
+            S1RhUDFqVTZnQXFidDhVYmdYMzhSVFF4UFNZCjZ6N2JUS2pHVFNYa2xEalVNU3pv
+            cS8zUngva0dLbWFOTE1TUXhMRm1XSGcKLS0tIHcyVC9PeTZkU0Z2eVR5S01RbDRZ
+            UDZvTDd1TzR1Tzk1T1Z1TFd6RlVITVUKRUaxJbAspdaQxl/86bNiY0IIk3u+99Jc
+            vYHc/LxasihVeC9a3Ka0TRaP8fa3DXBMQ0CTbzJoAuyGLDzcZfUhwg==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age1sjmlg66lxtmwt4krugp6nncqv4mz7y4mwsau5p8ucjhe837y73gqfjdvw3
+    encrypted_regex: ^(data|stringData)$
+    lastmodified: "2026-10-14T03:08:12Z"
+    mac: ENC[AES256_GCM,data:SIhBEWRISdi3JaLeSLxGKqXN+Q+3rFrV9xhR2bS3OujXaay5lhAon3YktkHoNjFBMA2+Mjd0xM6zdFZKmlrDHbn8j6A0WyEfmVvm6cgoqiCvQQsCOWpFKbmxdRW9C4OgmhTijdP8UL6wXaIeKAFEjywCMDOkb/bMc1PdGkIWElw=,iv:86RBsTylUJXkUw0sji5v4oPZF9LOFh0rX3q8M2gNnc0=,tag:AJ5BBX53yR0b2V8ywssdoQ==,type:str]
+    pgp:
+        - created_at: "2026-10-14T03:08:12Z"
+          enc: |-
+            -----BEGIN PGP MESSAGE-----
+
+            hQEMAxaYD7+KHjePAQf9GZmnLvbHJK9vhSi8qgmjvjKX2QrgsEBK9n5P9MQ1UDWm
+            SaCzftnHbezxU91mDJqGsGPk10hvvLJslBcpIPjMHoMZQD87XDBEwv0Zp1ryr2en
+            4xEUXYJHMlBM359cr9ksGMCwRrRo4Vc1f1UTnfAz+BfNIRlNnfWz8//l/N1jkbKh
+            JL0hCr2dT8F+AF62mriW1tMAmWiWtar5H5LV8PmwOwwRLSYJkFDzYkqcYPZiWcAG
+            RTjUgvtwUMPxjRAOZq31Z5olvFrJtMCvyaEIxAuE6QcskJ3q4PRAwZX0rlhlE8B6
+            XM7fntCp/5neG+dAcUwyCtom1Lq7NUKr/3+i6P3IoNJeAS1ChZIf5VkSRB29pQ6b
+            O8Fjri5RGtgWdLc9+ALjjBbpKe3AGaXgS0aN0+EJ8eJWtGXgZW/BOvoQv/7V3U9u
+            ir/pMomdwI4yyehdXqkJhOP7Vd5x3pXN+FOYDtw5gw==
+            =x02H
+            -----END PGP MESSAGE-----
+          fp: 389CE330EA884FC9703F4D7EB5ECACA8E170DF19
+    version: 3.13.3

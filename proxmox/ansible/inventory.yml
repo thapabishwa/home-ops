@@ -1,0 +1,7 @@
+# One host. By name, through the router's DNS; root, because everything here
+# is system configuration.
+all:
+  hosts:
+    pve:
+      ansible_host: pve.internal
+      ansible_user: root

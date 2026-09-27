@@ -1,0 +1,3 @@
+# Media library for the Kubernetes cluster (talos-cp-1 10.0.0.20, talos-w-1 10.0.0.21).
+# all_squash to 100000: the uid unprivileged CTs write as, so pods and CTs share ownership.
+/mnt/pve/media 10.0.0.20/31(rw,sync,no_subtree_check,all_squash,anonuid=100000,anongid=100000)

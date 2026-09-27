@@ -1,0 +1,173 @@
+# Blackbox prober. Its modules are blackbox.yml, generated into a ConfigMap
+# with a content hash in its name (kustomization.yaml), so editing a module
+# rolls the pod -- blackbox does not reload its config by itself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: blackbox}
+  template:
+    metadata:
+      labels: {app: blackbox}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: blackbox
+          image: quay.io/prometheus/blackbox-exporter:v0.25.0
+          args: [--config.file=/etc/blackbox/blackbox.yml]
+          ports:
+            - {name: http, containerPort: 9115}
+          readinessProbe:
+            httpGet: {path: /-/healthy, port: http}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 96Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/blackbox, readOnly: true}
+            - {name: household-ca, mountPath: /etc/household-ca, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: blackbox-config}
+        # The household CA's certificate, without a copy in the repo:
+        # cert-manager writes the issuing CA into every certificate Secret as
+        # ca.crt. This one belongs to prometheus.internal's Ingress, in the
+        # same namespace.
+        - name: household-ca
+          secret:
+            secretName: prometheus-internal-tls
+            items:
+              - {key: ca.crt, path: ca.crt}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackbox
+spec:
+  selector: {app: blackbox}
+  ports:
+    - {name: http, port: 9115, targetPort: http}
+---
+# Not "is the link up" but "does the stuff I use respond". By hostname, over the
+# live path, over real HTTPS. netwatch cannot do this: its probes are pinned
+# per-ISP by destination IP, and it rejects hostnames outright, while these
+# services sit behind CDNs whose IPs rotate.
+#
+# One Probe per service, so each carries its `service` label. All share the job
+# name the dashboards and alerts match on.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: google-workspace
+spec:
+  jobName: blackbox-work
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {service: google-workspace}
+      static:
+          - https://mail.google.com
+          - https://meet.google.com
+          - https://calendar.google.com
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: slack
+spec:
+  jobName: blackbox-work
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {service: slack}
+      static:
+          - https://slack.com
+          - https://app.slack.com
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: github
+spec:
+  jobName: blackbox-work
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {service: github}
+      static:
+          - https://github.com
+          - https://api.github.com
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+# Atlassian's shared login, which every site signs in through.
+# /login, not /: the root answers 301 to it.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: atlassian
+spec:
+  jobName: blackbox-work
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {service: atlassian}
+      static:
+          - https://id.atlassian.com/login
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: zoom
+spec:
+  jobName: blackbox-work
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_2xx
+  prober:
+    url: blackbox.monitoring.svc:9115
+  targets:
+    staticConfig:
+      labels: {service: zoom}
+      static:
+          - https://zoom.us
+          - https://api.zoom.us
+      relabelingConfigs:
+        - action: labeldrop
+          regex: namespace

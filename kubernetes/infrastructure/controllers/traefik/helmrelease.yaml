@@ -1,0 +1,43 @@
+# The cluster's ingress: one LAN address, 10.0.0.30, for every app.
+#
+# Traefik rather than ingress-nginx: ingress-nginx was retired upstream (last
+# release March 2026). Traefik also speaks Gateway API, for when Ingress
+# objects give way to HTTPRoutes.
+#
+# DNS: each app gets a plain <name>.internal record pointing at 10.0.0.30 in
+# ../../../../home-network/terraform/addressing.tf -- one explicit record per
+# app, never a wildcard.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: traefik
+      version: 41.7.0
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+  install:
+    crds: CreateReplace
+  upgrade:
+    crds: CreateReplace
+  values:
+    service:
+      annotations:
+        # Fixed, so DNS can point at it. Must sit inside the MetalLB pool.
+        metallb.io/loadBalancerIPs: 10.0.0.30
+      spec:
+        # Keep the client's address in access logs instead of a node's.
+        # With MetalLB L2 this also means the address is announced from the
+        # node actually running Traefik, so traffic never takes a second hop.
+        externalTrafficPolicy: Local
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi

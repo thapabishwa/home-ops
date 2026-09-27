@@ -1,0 +1,46 @@
+# HTTP -> HTTPS, for every browser-facing name in this namespace. Referenced
+# per Ingress (lan-proxy-redirect-https@kubernetescrd) rather than set on the
+# whole web entrypoint, because jellyfin.internal (apps/media) must keep
+# answering plain HTTP: TV and phone Jellyfin apps do not trust the household CA.
+#
+# On a request that is already HTTPS this middleware does nothing.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+# Anything else that reaches 10.0.0.30 -- a bare IP, a stale name -- goes to
+# the dashboard. A redirect, not a proxy, because Homepage rejects Hosts it
+# does not know. No host rule makes this Traefik's lowest-priority router, so
+# every named Ingress wins over it. The backend is never reached -- the
+# middleware answers first -- but an Ingress must name one.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: to-home
+spec:
+  redirectRegex:
+    regex: ^https?://[^/]+(.*)$
+    replacement: https://home.internal${1}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: catch-all
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: lan-proxy-to-home@kubernetescrd
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tplink
+                port:
+                  name: http

@@ -1,0 +1,85 @@
+# Nightly restic snapshot of Jellyfin's and qBittorrent's config volumes to
+# pve's media disk, through the namespace's existing library claim.
+#
+# Off the cluster, not off the laptop; see ../homenet/backup.yaml. Jellyfin's
+# database is copied while Jellyfin runs, so a snapshot is crash-consistent at
+# best: SQLite recovers from that, but the snapshot is not tested until a
+# restore is. The media itself is not backed up.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+spec:
+  # 03:30 in Kathmandu, after homenet's.
+  schedule: "45 21 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: backup
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: restic
+              image: restic/restic:0.19.1
+              command: [sh, -c]
+              args:
+                - |
+                  set -eu
+                  # Created on pve by proxmox/ansible. Not mkdir -p: the export squashes
+                  # every client to 100000, and the NFS server refuses a mkdir in the
+                  # root-owned top level before it notices the directory already exists.
+                  [ -d /target/backups ] || { echo "/target/backups missing: run proxmox/ansible"; exit 1; }
+                  restic cat config >/dev/null 2>&1 || restic init
+                  restic backup --host media --tag nightly --exclude-caches /config
+                  restic forget --host media --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+                  restic check
+              env:
+                - { name: RESTIC_REPOSITORY, value: /target/backups/restic-media }
+                - name: RESTIC_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: backup, key: password }
+                - { name: RESTIC_CACHE_DIR, value: /tmp/cache }
+                - { name: HOME, value: /tmp }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts:
+                - { name: jellyfin, mountPath: /config/jellyfin, readOnly: true }
+                - { name: qbittorrent, mountPath: /config/qbittorrent, readOnly: true }
+                - { name: target, mountPath: /target }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: jellyfin
+              persistentVolumeClaim:
+                claimName: config-jellyfin-0
+                readOnly: true
+            - name: qbittorrent
+              persistentVolumeClaim:
+                claimName: config-qbittorrent-0
+                readOnly: true
+            - name: target
+              persistentVolumeClaim:
+                claimName: library
+            - name: tmp
+              emptyDir: {}

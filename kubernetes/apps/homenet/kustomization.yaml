@@ -1,0 +1,33 @@
+# The household network's own plumbing:
+#
+#   dash-agent  serves wan.json / switch.json (collected on demand from the
+#               hEX and the switch) and power.json (pushed by the pve host)
+#               for Homepage's widgets
+#   isp-watch   every minute: notices WAN state changes, appends to
+#               isp-events.log
+#   isp-log     every 5 minutes: per-ISP loss and throughput history,
+#               isp-history.csv
+#
+# Paths in the scripts come from the environment, with conventional /var paths
+# as defaults. They ship as a ConfigMap, so editing one is a
+# commit; the image (../../images/homenet-agent) is only python3 + curl.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: homenet
+resources:
+  - namespace.yaml
+  - secret.sops.yaml
+  - pvc.yaml
+  - dash-agent.yaml
+  - cronjobs.yaml
+  - servicemonitor.yaml
+  - backup.sops.yaml
+  - backup.yaml
+configMapGenerator:
+  - name: homenet-scripts
+    files:
+      - scripts/dash-agent.py
+      - scripts/wan-json.sh
+      - scripts/switch-json.sh
+      - scripts/isp-watch.sh
+      - scripts/isp-log.sh

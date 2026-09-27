@@ -1,0 +1,35 @@
+# The Flux Operator: manages the Flux controllers from a FluxInstance
+# (../../../clusters/home/flux-instance.yaml) and serves the Flux web UI at
+# https://flux.internal.
+#
+# Flux installs and upgrades the operator, and the operator manages Flux --
+# the arrangement the operator's own docs recommend.
+#
+# The web UI has no login configured, so it is read-only: every Flux object is
+# visible, Secrets and ConfigMaps are not, and actions such as reconcile or
+# suspend are disabled. Turning them on needs single sign-on.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: flux-operator
+spec:
+  interval: 30m
+  releaseName: flux-operator
+  chartRef:
+    kind: OCIRepository
+    name: flux-operator
+  values:
+    web:
+      ingress:
+        enabled: true
+        annotations:
+          cert-manager.io/cluster-issuer: internal-ca
+          traefik.ingress.kubernetes.io/router.middlewares: flux-system-redirect-https@kubernetescrd
+        hosts:
+          - host: flux.internal
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - hosts: [flux.internal]
+            secretName: flux-internal-tls

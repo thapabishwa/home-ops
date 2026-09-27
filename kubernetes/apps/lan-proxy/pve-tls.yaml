@@ -1,0 +1,60 @@
+# Traefik -> pve:8006 over TLS, verified.
+#
+# pve serves a certificate from its own cluster CA, for the names pve,
+# pve.homelab and localhost (not proxmox.internal -- browsers never see that
+# certificate, Traefik does). Verifying against pve's root and the name `pve`
+# keeps the hop to pve authenticated instead of skipping verification.
+#
+# pve renews its node certificate itself, signed by the same root, so this
+# keeps working until the root expires in September 2036.
+#
+# The certificate below is public: it is /etc/pve/pve-root-ca.pem on pve.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pve-root-ca
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIF3TCCA8WgAwIBAgIUeWoc6n3tBRwPs/b0wfKF1vHXEWAwDQYJKoZIhvcNAQEL
+    BQAwdjEkMCIGA1UEAwwbUHJveG1veCBWaXJ0dWFsIEVudmlyb25tZW50MS0wKwYD
+    VQQLDCQzMDM1ODMzMC0xMTFmLTQ2ZTAtYTdiNS00M2YyMDgyZDRjZTUxHzAdBgNV
+    BAoMFlBWRSBDbHVzdGVyIE1hbmFnZXIgQ0EwHhcNMjYwOTEzMTAwNjUyWhcNMzYw
+    OTEwMTAwNjUyWjB2MSQwIgYDVQQDDBtQcm94bW94IFZpcnR1YWwgRW52aXJvbm1l
+    bnQxLTArBgNVBAsMJDMwMzU4MzMwLTExMWYtNDZlMC1hN2I1LTQzZjIwODJkNGNl
+    NTEfMB0GA1UECgwWUFZFIENsdXN0ZXIgTWFuYWdlciBDQTCCAiIwDQYJKoZIhvcN
+    AQEBBQADggIPADCCAgoCggIBAJh3AvojwzlyJb3t8AJ0ytCwXXP33plGDLU7VnyZ
+    /6cipeIaaRtcfXtMSsmiuthgwV/a9Tdv89zHaYY3eJFuqKiE22QzYaoA0X4aBQJu
+    JT7nIbK2tuZThsRL23vo8M8XngeJSvh+ChYto/Ax+92eOsgLv/6jpUJiYVy4QUE0
+    Y4c5F9btfDL8Nnn2Q91fHTNkM7oOu93/KPtobfarX9cYptT6qHd5UhFjRXAVXogj
+    J98HRVtrmbAwKSXhizjAYnFLth9pNwpm3rzi649y8o+ux4EsxuCyIE4pcnsgltuO
+    GIjmmFx9Lpji1DniLdY+3o2COzZNJ2Vs2x6519EvXl4HNn1zbIMxIJO7G9UgSY7c
+    DQXdk4J9OyQgLbtPmlltRP71ICOeSlKnlQWXuAn7F70QSkbXJc302+vMRTQSt+KT
+    BzXfr1+dldoO3SgEyQyBwaafB9DxBlhQ2zc92RCTxT8j/6ppcjPgeyikaLlUnby/
+    BdahlAdI6pVKMzb+dcY5OVLZImW7f8J5Ui04jDXlVUrFq62f0TRFzwKAw7OY8EsK
+    Mh7Wv5Q9y5hRnxDd4gBzWHCE8FeQQvAead1H7o/UQqK6SwrqrJG/1uYpzW5rBpD7
+    kf61H1VvsRWWJ22ZqAXfhzA7A2T2EJoFd2mOTE9WKHkwqbsY0KqPvJVB8H2QeqfR
+    4V0lAgMBAAGjYzBhMB0GA1UdDgQWBBSK5Ja6rSkbeTniO2YRCGsooyx4BjAfBgNV
+    HSMEGDAWgBSK5Ja6rSkbeTniO2YRCGsooyx4BjAPBgNVHRMBAf8EBTADAQH/MA4G
+    A1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAgEAeTSkkehyT0KUmG1fd7Ys
+    yVlTjvDOvx6HaHaAB7FzS+hdVPrf5uO9G7ACT/BYhsYEa7G2mdqdRbYLqQlUPTfj
+    ZjPOPEnPlhk58ml/U6IclDUc9ndxwUgmiMkVUF+ej/jrvOPT968/WfNZGLfBhl6M
+    wS0wZ0LC2/UvgpClrZM49H7r7A3+0Uk1eWWpuS+PfBrq0bOc8kbKmCEP0rtV6Qom
+    vcdqYMPvG467qOZR2vdAeTsAd5i6jP/VesdqyyuD+/xSzrHlXOFMYGJhVlEPZUEG
+    c+w4izKLhsLRSD2TmNM96nMQ5Tq/eCeT/xP/RqIFpjZywM2oO+ymyIkew8WyFSTE
+    Zb/abMMR0I5G1jkyx/70vlzUWO6/AEt+UDHkOir+T2L+g/ZyJgxy72j1l/vwfzUB
+    4VHACxV4HAt5XbEDuGFNTRtj8ldE+5elb94hCIsKdwPU9oDl5tbfh4TjfxyB31Af
+    MbxKMQT61MDH2GzFJLwD8PZ1krZEdn4ewuWmhNJgX/AK51/JIoO7JQ253KhMtBii
+    FkLcXCCTQFmDfMtzjgABwgszrPQabttNdTeHKMkPCXPh+yB/vyv70TubGV8gqLwh
+    D6ESw/jWUtT3psLvR3Rb7OMlpxRe5th+Txi1Ou0wO5N4PjXwLaW8Kq6logfjpX7W
+    ByrnWkXzVe+aR2RhdKXF8Q4=
+    -----END CERTIFICATE-----
+---
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: pve
+spec:
+  serverName: pve
+  rootCAs:
+    - configMap: pve-root-ca

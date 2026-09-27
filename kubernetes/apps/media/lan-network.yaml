@@ -1,0 +1,37 @@
+# A second network for pods that must appear on the LAN as a host of their
+# own: a macvlan interface on the node's eth0, attached by Multus.
+#
+# The address and MAC come from the pod's annotation (capabilities ips/mac),
+# so one definition serves any pod.
+#
+# sbr (source-based routing) moves the interface's routes -- the LAN subnet
+# and a default route via the router -- out of the main table into a table
+# of their own, used only for traffic from the LAN address. The main table
+# keeps the cluster's routes, so probes, DNS and everything not bound to the
+# LAN address behave as in any pod. Without sbr, the pod would send replies
+# to its own node (kubelet probes) out of the macvlan, and a macvlan
+# interface cannot reach its parent host.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: lan
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "lan",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "master": "eth0",
+          "mode": "bridge",
+          "capabilities": { "ips": true },
+          "ipam": {
+            "type": "static",
+            "routes": [{ "dst": "0.0.0.0/0", "gw": "10.0.0.1" }]
+          }
+        },
+        { "type": "sbr" },
+        { "type": "tuning", "capabilities": { "mac": true } }
+      ]
+    }

@@ -1,0 +1,159 @@
+# The WAN recording and alerting rules. Their shape is set by 2026-09-23:
+# NTFiber was down four hours and nobody knew, because nothing watched the
+# thing that had already noticed.
+#
+# A PrometheusRule: the operator loads it into Prometheus on change, and its
+# admission webhook rejects a rule that does not parse before it is applied.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: wan-rules
+spec:
+  groups:
+    - name: wan-health
+      rules:
+        # mktxp carries up/down in a `status` LABEL on an info metric whose
+        # value is always 1. Counting status="1" alone is a trap: when every
+        # probe on a link fails the series stops existing rather than
+        # reporting zero, so an alert on == 0 would go silent exactly when it
+        # mattered. The `or` supplies an explicit zero.
+        #
+        # comment=~"ISP.-probe" is load-bearing: the CPE reachability probes
+        # carry their own comments, and without the filter one missed ICMP to
+        # a CPE would page as "all three probes failing".
+        - record: isp:probes_up
+          expr: >
+            sum by (comment) (mktxp_netwatch_info{comment=~"ISP.-probe",status="1"})
+            or
+            (sum by (comment) (mktxp_netwatch_info{comment=~"ISP.-probe"}) * 0)
+
+        - record: isp:healthy
+          expr: count(isp:probes_up == 3) or vector(0)
+
+    - name: wan-alerts
+      rules:
+        - alert: ISPDown
+          expr: isp:probes_up == 0
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $labels.comment }} is down"
+            description: "All three probes failing. Three independent operators, so this is the path, not one resolver."
+
+        - alert: ISPDegraded
+          expr: isp:probes_up > 0 and isp:probes_up < 3
+          for: 10m
+          labels: {severity: info}
+          annotations:
+            summary: "{{ $labels.comment }} partially degraded"
+            description: "{{ $value }}/3 probes up for 10m — one operator may simply be unreachable."
+
+        # One link left is not an outage, so nothing else reports it -- but it
+        # means the next failure is one.
+        - alert: NoRedundancy
+          expr: isp:healthy <= 1
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Only {{ $value }} healthy WAN left"
+            description: "Failover has nowhere to go if this one drops."
+
+        - alert: AllWANsDown
+          expr: isp:healthy == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "All three WANs are down"
+
+        # Without this, a dead exporter looks identical to a total outage.
+        - alert: RouterUnreachable
+          expr: up{job="mktxp"} == 0
+          for: 3m
+          labels: {severity: critical}
+          annotations:
+            summary: "Cannot reach the hEX — WAN state is unknown, not necessarily bad"
+
+    - name: wan-counters
+      # mktxp declares these as gauges, but they are the router's own
+      # cumulative counters; increase() applies counter-reset logic anyway,
+      # which is wanted -- they reset when a netwatch entry is EDITED, not
+      # only on reboot.
+      #
+      # This exists because mktxp_netwatch_info is a gauge sampled every 30s
+      # and the events are seconds long. On 2026-09-28 Grafana showed only
+      # ISP2 in trouble while the router had logged six whole-link ISP1
+      # outages, every one aliased away between scrapes. A counter cannot
+      # alias: a 7-second outage is +1 failed whatever the interval.
+      rules:
+        # Per TARGET: within one link the three probes should agree, and any
+        # target consistently worse than its peers is the target, not the link.
+        - record: isp:target_loss_ratio1d
+          expr: >
+            increase(mktxp_netwatch_failed_tests{name!~"ISP.-cpe"}[1d])
+            /
+            clamp_min(increase(mktxp_netwatch_done_tests{name!~"ISP.-cpe"}[1d]), 1)
+
+        # Per LINK. label_replace lifts ISP0/1/2 out of the probe name: these
+        # two metrics carry `name` but not the `comment` label.
+        - record: isp:link_loss_ratio5m
+          expr: >
+            sum by (isp) (label_replace(
+              increase(mktxp_netwatch_failed_tests{name!~"ISP.-cpe"}[5m]),
+              "isp", "$1", "name", "(ISP[0-2])-.*"))
+            /
+            clamp_min(sum by (isp) (label_replace(
+              increase(mktxp_netwatch_done_tests{name!~"ISP.-cpe"}[5m]),
+              "isp", "$1", "name", "(ISP[0-2])-.*")), 1)
+
+        # Separates "the carrier broke" from "the box downstairs vanished".
+        - record: isp:cpe_up
+          expr: mktxp_netwatch_status{name=~"ISP.-cpe"}
+
+    # The controller itself, as dash-agent republishes it from isp-watch. Its
+    # failure modes look healthy from every other signal: in SHADOW it decides
+    # and logs but moves nothing, and a stalled scheduler leaves every route
+    # where it was. Both happened (2026-09-22, 12.5 hours in SHADOW).
+    #
+    # Three separate questions, so that "cannot see the controller" never
+    # passes for "controller fine" or pages as "controller broken".
+    - name: controller
+      rules:
+        - record: isp:controller_enforcing
+          expr: max(homenet_controller_enforcing)
+
+        - record: isp:controller_mode_known
+          expr: max(homenet_controller_mode_known)
+
+        - record: isp:controller_runs5m
+          expr: sum(increase(homenet_controller_runs_total[5m]))
+
+        - record: isp:controller_watch_age_seconds
+          expr: time() - max(homenet_watch_last_run_timestamp_seconds)
+
+        - alert: ControllerNotEnforcing
+          expr: isp:controller_enforcing == 0 and isp:controller_watch_age_seconds < 300
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "The hEX controller is not enforcing: failover is off"
+            description: "Its heartbeat says SHADOW. Runbook: ControllerNotEnforcing."
+
+        - alert: ControllerStalled
+          expr: isp:controller_runs5m == 0 and isp:controller_watch_age_seconds < 300
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "The hEX controller's run-count has stopped"
+            description: "The scheduler is not running it, so routes stay where they were. Runbook: Controller stalled."
+
+        # A heartbeat goes out every 15 minutes, so 20 minutes without one
+        # found is the watcher's parsing, or the controller not logging.
+        - alert: ControllerUnobserved
+          expr: >
+            absent(isp:controller_watch_age_seconds) or isp:controller_watch_age_seconds > 300
+            or isp:controller_mode_known == 0
+          for: 20m
+          labels: {severity: warning}
+          annotations:
+            summary: "Nothing is reading the controller's state"
+            description: "isp-watch or dash-agent is not running, cannot reach the hEX, or finds no heartbeat in its log; the two alerts above are blind."

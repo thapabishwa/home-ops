@@ -1,0 +1,28 @@
+# Household state that must alert from outside the house. Recorded as home:*,
+# which the remote-write filter in kube-prometheus-stack.yaml sends to Grafana
+# Cloud; the cluster's own alerts go nowhere yet.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: home-rules
+spec:
+  groups:
+    - name: backups
+      rules:
+        # One series per backup CronJob (homenet, media). A job that has never
+        # succeeded has no last-success time, so it is aged from its creation.
+        - record: home:backup_age_seconds
+          expr: >
+            time() - max by (namespace, cronjob) (
+              kube_cronjob_status_last_successful_time{cronjob="backup"}
+              or
+              kube_cronjob_created{cronjob="backup"}
+            )
+
+        - alert: BackupStale
+          expr: home:backup_age_seconds > 26 * 3600
+          for: 30m
+          labels: {severity: warning}
+          annotations:
+            summary: "No successful {{ $labels.namespace }} backup for over a day"
+            description: "kubectl -n {{ $labels.namespace }} get jobs,pods -l app=backup; runbook: Backups."

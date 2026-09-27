@@ -1,0 +1,9 @@
+# HTTP -> HTTPS for homepage.internal. Does nothing to a request already on HTTPS.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

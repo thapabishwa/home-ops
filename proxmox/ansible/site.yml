@@ -1,0 +1,160 @@
+# The Proxmox host's own configuration: what makes a ThinkPad P52 a server.
+#
+#   ansible-playbook site.yml --check --diff   # what would change; nothing, when converged
+#   ansible-playbook site.yml --diff           # apply
+#
+# Deliberately not managed, and why, is in ../README.md: the network config
+# (the path Ansible arrives on) and /etc/pve (Proxmox's own cluster
+# filesystem, changed through Proxmox).
+- name: pve
+  hosts: pve
+  become: false
+  tasks:
+    # restic reads the cluster's backups, which land on the media disk.
+    - name: Packages the scripts, the NFS export and backup restores need
+      ansible.builtin.apt:
+        name: [nfs-kernel-server, lm-sensors, python3, curl, restic]
+        state: present
+
+    # --- Hardware: thermals, battery, GPU
+
+    - name: Kernel module options -- fan control, and no nouveau for the unused Quadro
+      ansible.builtin.copy:
+        src: "modprobe.d/{{ item }}"
+        dest: "/etc/modprobe.d/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: [thinkpad_acpi.conf, blacklist-nouveau.conf]
+      notify: Rebuild initramfs
+
+    - name: Fan curve -- ramps early, never stops the fan
+      ansible.builtin.copy:
+        src: bin/fan-curve.py
+        dest: /usr/local/bin/fan-curve.py
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart fan curve
+
+    - name: Scripts run by cron and apt
+      ansible.builtin.copy:
+        src: "bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop: [power-json.sh, log-temp.sh, pve-remove-nag.sh]
+
+    - name: Units -- fan curve, battery cap, CPU governor, no turbo
+      ansible.builtin.copy:
+        src: "systemd/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - thinkpad-fan.service
+        - thinkpad-battery.service
+        - cpu-governor.service
+        - cpu-noturbo.service
+      register: units
+
+    - name: Units enabled and running, re-run if their file changed
+      ansible.builtin.systemd_service:
+        name: "{{ item.item }}"
+        enabled: true
+        state: "{{ 'restarted' if item.changed else 'started' }}"
+        daemon_reload: "{{ item.changed }}"
+      loop: "{{ units.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # --- Logs and the dashboard feed
+
+    - name: Journal kept for months, not days
+      ansible.builtin.copy:
+        src: journald-retention.conf
+        dest: /etc/systemd/journald.conf.d/retention.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart journald
+
+    # In /etc/cron.d rather than root's crontab, so it is a file this playbook
+    # owns outright.
+    - name: Every minute -- the thermal trail, and power.json to the dashboard
+      ansible.builtin.copy:
+        dest: /etc/cron.d/pve-host
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by proxmox/ansible -- changes here are overwritten.
+          * * * * * root /usr/local/bin/log-temp.sh
+          * * * * * root /usr/local/bin/power-json.sh
+
+    - name: No copies of those jobs left in root's own crontab
+      ansible.builtin.lineinfile:
+        path: /var/spool/cron/crontabs/root
+        regexp: '^\* \* \* \* \* /usr/local/bin/(log-temp|power-json)\.sh$'
+        state: absent
+
+    # --- The media library, shared into the Kubernetes cluster
+
+    - name: NFS export of the media disk to both nodes
+      ansible.builtin.copy:
+        src: exports
+        dest: /etc/exports
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Re-export
+
+    - name: NFS server running
+      ansible.builtin.systemd_service:
+        name: nfs-server
+        enabled: true
+        state: started
+
+    # The cluster's restic repositories. Every NFS client is squashed to
+    # 100000, which cannot create directories in the disk's root-owned top
+    # level, so the backup jobs need this one to exist already.
+    - name: Directory for the cluster's backups
+      ansible.builtin.file:
+        path: /mnt/pve/media/backups
+        state: directory
+        owner: "100000"
+        group: "100000"
+        mode: "0750"
+
+    # --- The subscription notice
+
+    - name: Re-patch the web UI's subscription notice after every apt run
+      ansible.builtin.copy:
+        src: no-nag-script
+        dest: /etc/apt/apt.conf.d/no-nag-script
+        owner: root
+        group: root
+        mode: "0644"
+
+  handlers:
+    # Blacklisting nouveau only holds from early boot if the initramfs knows.
+    # Takes effect at the next reboot either way.
+    - name: Rebuild initramfs
+      ansible.builtin.command: update-initramfs -u
+      changed_when: true
+
+    - name: Restart fan curve
+      ansible.builtin.systemd_service:
+        name: thinkpad-fan
+        state: restarted
+
+    - name: Restart journald
+      ansible.builtin.systemd_service:
+        name: systemd-journald
+        state: restarted
+
+    - name: Re-export
+      ansible.builtin.command: exportfs -ra
+      changed_when: true
